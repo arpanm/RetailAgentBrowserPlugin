@@ -377,8 +377,13 @@ export class AmazonPlatform extends EcommercePlatform {
                     const storageText = filters.storage.replace(/gb/i, '').trim();
                     const storageLink = Array.from(document.querySelectorAll('a, span, label')).find(el => {
                         const text = (el.textContent || '').toLowerCase();
-                        return text.includes(`${storageText}gb`) || text.includes(`${storageText} gb`) &&
-                               (el.closest('#p_n_feature_nine_browse-bin') || el.closest('[aria-label*="Storage"]'));
+                        // Support various labels like "256 GB", "256GB", "SSD 256GB"
+                        return (text.includes(`${storageText}gb`) || text.includes(`${storageText} gb`)) &&
+                               (el.closest('#p_n_feature_nine_browse-bin') || 
+                                el.closest('#p_n_feature_seven_browse-bin') ||
+                                el.closest('#p_n_feature_browse-bin') ||
+                                el.closest('[aria-label*="Storage"]') ||
+                                el.closest('[aria-label*="SSD"]'));
                     });
                     if (storageLink) {
                         storageLink.click();
@@ -397,8 +402,12 @@ export class AmazonPlatform extends EcommercePlatform {
                     const ramText = filters.ram.replace(/gb/i, '').replace(/more than/i, '').trim();
                     const ramLink = Array.from(document.querySelectorAll('a, span, label')).find(el => {
                         const text = (el.textContent || '').toLowerCase();
-                        return text.includes(`${ramText}gb`) || text.includes(`${ramText} gb`) &&
-                               (el.closest('#p_n_feature_eight_browse-bin') || el.closest('[aria-label*="RAM"]'));
+                        // Support "16 GB", "16GB", etc.
+                        return (text.includes(`${ramText}gb`) || text.includes(`${ramText} gb`)) &&
+                               (el.closest('#p_n_feature_eight_browse-bin') || 
+                                el.closest('#p_n_feature_five_browse-bin') ||
+                                el.closest('[aria-label*="RAM"]') ||
+                                el.closest('[aria-label*="Memory"]'));
                     });
                     if (ramLink) {
                         ramLink.click();

@@ -115,15 +115,16 @@ export class FlipkartPlatform extends EcommercePlatform {
             // Apply brand filter
             if (filters.brand) {
                 try {
-                    const brandLink = Array.from(document.querySelectorAll('a, div')).find(el => {
+                    const brandText = filters.brand.toLowerCase().trim();
+                    const brandLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
                         const text = el.textContent?.toLowerCase() || '';
-                        return text.includes(filters.brand.toLowerCase()) && 
-                               (el.closest('[class*="filter"]') || el.closest('[class*="Brand"]'));
+                        return text.includes(brandText) && 
+                               (el.closest('[class*="filter"]') || el.closest('[class*="Brand"]') || el.closest('section'));
                     });
                     if (brandLink) {
                         brandLink.click();
                         logger.info('Flipkart: Applied brand filter', { brand: filters.brand });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        await new Promise(resolve => setTimeout(resolve, 3000));
                     }
                 } catch (brandError) {
                     logger.warn('Flipkart: Failed to apply brand filter', { error: brandError.message });
@@ -133,16 +134,17 @@ export class FlipkartPlatform extends EcommercePlatform {
             // Apply RAM filter
             if (filters.ram) {
                 try {
-                    const ramText = filters.ram.replace(/gb/i, '').replace(/more than/i, '').trim();
-                    const ramLink = Array.from(document.querySelectorAll('a, div')).find(el => {
+                    const ramVal = parseInt(filters.ram.toLowerCase().replace(/\D/g, ''));
+                    const ramLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
                         const text = el.textContent || '';
-                        return text.includes(`${ramText} GB`) || text.includes(`${ramText}GB`) &&
-                               (el.closest('[class*="filter"]') || el.closest('[class*="RAM"]'));
+                        const textLower = text.toLowerCase();
+                        return (textLower.includes(`${ramVal}gb`) || textLower.includes(`${ramVal} gb`)) &&
+                               (el.closest('[class*="filter"]') || el.closest('[class*="RAM"]') || el.closest('section'));
                     });
                     if (ramLink) {
                         ramLink.click();
                         logger.info('Flipkart: Applied RAM filter', { ram: filters.ram });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        await new Promise(resolve => setTimeout(resolve, 3000));
                     }
                 } catch (ramError) {
                     logger.warn('Flipkart: Failed to apply RAM filter', { error: ramError.message });
@@ -152,16 +154,18 @@ export class FlipkartPlatform extends EcommercePlatform {
             // Apply storage filter
             if (filters.storage) {
                 try {
-                    const storageText = filters.storage.replace(/gb/i, '').trim();
-                    const storageLink = Array.from(document.querySelectorAll('a, div')).find(el => {
+                    const storageVal = parseInt(filters.storage.toLowerCase().replace(/\D/g, ''));
+                    const storageLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
                         const text = el.textContent || '';
-                        return text.includes(`${storageText} GB`) || text.includes(`${storageText}GB`) &&
-                               (el.closest('[class*="filter"]') || el.closest('[class*="Storage"]'));
+                        const textLower = text.toLowerCase();
+                        return (textLower.includes(`${storageVal}gb`) || textLower.includes(`${storageVal} gb`) || 
+                                textLower.includes(`${storageVal}tb`) || textLower.includes(`${storageVal} tb`)) &&
+                               (el.closest('[class*="filter"]') || el.closest('[class*="Storage"]') || el.closest('section'));
                     });
                     if (storageLink) {
                         storageLink.click();
                         logger.info('Flipkart: Applied storage filter', { storage: filters.storage });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        await new Promise(resolve => setTimeout(resolve, 3000));
                     }
                 } catch (storageError) {
                     logger.warn('Flipkart: Failed to apply storage filter', { error: storageError.message });

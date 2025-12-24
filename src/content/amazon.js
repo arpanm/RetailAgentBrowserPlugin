@@ -89,7 +89,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                         filteredProducts = products;
                     }
                 }
-                
+
                 // Ensure response is fully serializable by converting to JSON and back
                 try {
                     const serializableProducts = JSON.parse(JSON.stringify(filteredProducts));
@@ -102,7 +102,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             } catch (error) {
                 logger.error('Content script: Error getting search results', error);
                 sendResponse({ items: [], success: false, error: error.message || 'Unknown error' });
-            }
+    }
         })();
         
         // Return true to indicate we will send response asynchronously
@@ -111,7 +111,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     // Handle other actions
     try {
-        if (request.action === 'CLICK_BUY_NOW') {
+    if (request.action === 'CLICK_BUY_NOW') {
             amazonPlatform.buyNow().then(success => {
                 sendResponse({ success });
             }).catch(error => {
@@ -190,7 +190,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             (async () => {
                 try {
                     const result = await enterAmazonPhoneNumber(request.phoneNumber);
-                    sendResponse({ success: true });
+            sendResponse({ success: true });
                 } catch (error) {
                     sendResponse({ success: false, error: error.message });
                 }
