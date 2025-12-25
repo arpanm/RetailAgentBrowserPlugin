@@ -215,3 +215,26 @@ export async function selectOption(selector, value, options = {}) {
     return element;
 }
 
+/**
+ * Wait for a condition to be met
+ */
+export async function waitForCondition(condition, options = {}) {
+    const timeout = options.timeout || 10000;
+    const interval = options.interval || 500;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeout) {
+        try {
+            const result = await condition();
+            if (result) {
+                return result;
+            }
+        } catch (error) {
+            // Ignore errors during condition check
+        }
+        await new Promise(resolve => setTimeout(resolve, interval));
+    }
+
+    throw new Error(`Condition not met within ${timeout}ms`);
+}
+

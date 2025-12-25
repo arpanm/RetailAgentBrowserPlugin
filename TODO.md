@@ -35,6 +35,9 @@ This document contains prioritized tasks for making RetailAgent production-ready
 ## Phase 3: Complete Ecommerce Operations
 
 - [ ] Implement advanced search with filters (price, brand, ratings, category)
+- [ ] Improve semantic DOM parsing for complex filter structures on Amazon and Flipkart
+- [ ] Implement multi-pass filter application with validation and retry logic
+- [ ] Fix search result extraction for non-standard page layouts and slow-loading content
 - [ ] Add sorting options (price low-high, ratings, newest, relevance)
 - [ ] Implement multi-page result navigation
 - [ ] Add product comparison functionality across multiple products

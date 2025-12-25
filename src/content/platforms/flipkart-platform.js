@@ -3,7 +3,8 @@
  */
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow } from '../shared/actions.js';
+import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow, sortResults, discoverAvailableFilters } from '../shared/actions.js';
+import { findElement, safeClick, fillInput, getText } from '../shared/selectors.js';
 import { logger } from '../../lib/logger.js';
 
 export class FlipkartPlatform extends EcommercePlatform {
@@ -81,10 +82,9 @@ export class FlipkartPlatform extends EcommercePlatform {
                 await this.applyFilters(filters);
             }
             
-            // Apply sort if provided (Flipkart sort implementation can be added here)
+            // Apply sort if provided
             if (sort) {
-                logger.info('Flipkart: Sort requested but not yet implemented', { sort });
-                // TODO: Implement Flipkart sort application
+                await this.sortResults(sort);
             }
             
             return true;
@@ -103,72 +103,70 @@ export class FlipkartPlatform extends EcommercePlatform {
                 return true;
             }
             
-            // Wait for page to fully load and filters sidebar to appear
+            // Wait for page to fully load
             await new Promise(resolve => setTimeout(resolve, 3000));
+            globalThis.scrollTo(0, 0);
             
-            // Scroll to top to ensure filters are visible
-            window.scrollTo(0, 0);
-            await new Promise(resolve => setTimeout(resolve, 500));
+            const initialUrl = globalThis.location.href;
+
+            // Discover and apply filters dynamically
+            let availableFilters = await discoverAvailableFilters();
             
-            logger.info('Flipkart: Page ready for filter application');
-            
-            // Apply brand filter
-            if (filters.brand) {
-                try {
-                    const brandText = filters.brand.toLowerCase().trim();
-                    const brandLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
-                        const text = el.textContent?.toLowerCase() || '';
-                        return text.includes(brandText) && 
-                               (el.closest('[class*="filter"]') || el.closest('[class*="Brand"]') || el.closest('section'));
-                    });
-                    if (brandLink) {
-                        brandLink.click();
-                        logger.info('Flipkart: Applied brand filter', { brand: filters.brand });
-                        await new Promise(resolve => setTimeout(resolve, 3000));
+            // Prioritize Brand
+            const keys = Object.keys(filters).sort((a, b) => {
+                if (a === 'brand') return -1;
+                if (b === 'brand') return 1;
+                return 0;
+            });
+
+            for (const key of keys) {
+                const value = filters[key];
+                if (!value) continue;
+
+                const targetLabels = [];
+                if (key === 'brand') targetLabels.push('brand', 'brands', 'brand name');
+                if (key === 'ram') targetLabels.push('ram', 'memory', 'system memory');
+                if (key === 'storage') targetLabels.push('storage', 'internal storage', 'ssd capacity');
+                if (key === 'rating') targetLabels.push('customer ratings', 'rating', 'avg. customer review');
+
+                let filterGroup = null;
+                for (const label of targetLabels) {
+                    if (availableFilters[label]) {
+                        filterGroup = availableFilters[label];
+                        break;
                     }
-                } catch (brandError) {
-                    logger.warn('Flipkart: Failed to apply brand filter', { error: brandError.message });
                 }
-            }
-            
-            // Apply RAM filter
-            if (filters.ram) {
-                try {
-                    const ramVal = parseInt(filters.ram.toLowerCase().replace(/\D/g, ''));
-                    const ramLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
-                        const text = el.textContent || '';
-                        const textLower = text.toLowerCase();
-                        return (textLower.includes(`${ramVal}gb`) || textLower.includes(`${ramVal} gb`)) &&
-                               (el.closest('[class*="filter"]') || el.closest('[class*="RAM"]') || el.closest('section'));
+
+                if (filterGroup) {
+                    const valueStr = value.toString().toLowerCase();
+                    const cleanValue = valueStr.replace(/(\d+)([a-z]+)/, '$1 $2');
+                    
+                    const target = filterGroup.elements.find(el => {
+                        const itemText = el.text.toLowerCase();
+                        const itemTextClean = itemText.replace(/\s+/g, '');
+                        const valueClean = valueStr.replace(/\s+/g, '');
+                        
+                        return itemText.includes(valueStr) || 
+                               itemText.includes(cleanValue) || 
+                               itemTextClean.includes(valueClean);
                     });
-                    if (ramLink) {
-                        ramLink.click();
-                        logger.info('Flipkart: Applied RAM filter', { ram: filters.ram });
+
+                    if (target) {
+                        logger.info(`Flipkart: Applying discovered filter ${key} -> ${target.text}`);
+                        const prevUrl = globalThis.location.href;
+                        await safeClick(target.element);
+                        
+                        // Wait and validate
                         await new Promise(resolve => setTimeout(resolve, 3000));
+                        if (globalThis.location.href === prevUrl) {
+                            logger.warn(`Flipkart: Filter ${key} didn't trigger navigation, trying with dispatchEvent`);
+                            await safeClick(target.element, { useDispatchEvent: true });
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                        }
+
+                        // Rediscover as DOM changes
+                        availableFilters = await discoverAvailableFilters();
                     }
-                } catch (ramError) {
-                    logger.warn('Flipkart: Failed to apply RAM filter', { error: ramError.message });
-                }
-            }
-            
-            // Apply storage filter
-            if (filters.storage) {
-                try {
-                    const storageVal = parseInt(filters.storage.toLowerCase().replace(/\D/g, ''));
-                    const storageLink = Array.from(document.querySelectorAll('a, div, label, span')).find(el => {
-                        const text = el.textContent || '';
-                        const textLower = text.toLowerCase();
-                        return (textLower.includes(`${storageVal}gb`) || textLower.includes(`${storageVal} gb`) || 
-                                textLower.includes(`${storageVal}tb`) || textLower.includes(`${storageVal} tb`)) &&
-                               (el.closest('[class*="filter"]') || el.closest('[class*="Storage"]') || el.closest('section'));
-                    });
-                    if (storageLink) {
-                        storageLink.click();
-                        logger.info('Flipkart: Applied storage filter', { storage: filters.storage });
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                    }
-                } catch (storageError) {
-                    logger.warn('Flipkart: Failed to apply storage filter', { error: storageError.message });
                 }
             }
             
@@ -190,81 +188,79 @@ export class FlipkartPlatform extends EcommercePlatform {
                 : [this.selectors.results.container];
             
             let products = [];
-            for (const containerSelector of containerSelectors) {
-                try {
-                    const containers = document.querySelectorAll(containerSelector);
-                    logger.info(`Flipkart: Found ${containers.length} containers with selector: ${containerSelector}`);
-                    
-                    if (containers.length > 0) {
-                        products = extractProducts(
-                            containerSelector,
-                            {
-                                title: Array.isArray(this.selectors.results.title) 
-                                    ? this.selectors.results.title[0] 
-                                    : this.selectors.results.title,
-                                price: Array.isArray(this.selectors.results.price) 
-                                    ? this.selectors.results.price[0] 
-                                    : this.selectors.results.price,
-                                link: Array.isArray(this.selectors.results.link) 
-                                    ? this.selectors.results.link[0] 
-                                    : this.selectors.results.link,
-                                image: Array.isArray(this.selectors.results.image) 
-                                    ? this.selectors.results.image[0] 
-                                    : this.selectors.results.image,
-                                rating: Array.isArray(this.selectors.results.rating) 
-                                    ? this.selectors.results.rating[0] 
-                                    : this.selectors.results.rating,
-                                reviews: '._13vcmD',
-                            }
-                        );
-                        
-                        if (products.length > 0) {
-                            logger.info(`Flipkart: Successfully extracted ${products.length} products with selector: ${containerSelector}`);
-                            break;
-                        }
-                    }
-                } catch (error) {
-                    logger.warn(`Flipkart: Selector ${containerSelector} failed`, { error: error.message });
-                    continue;
-                }
-            }
             
-            // If no products found, try manual extraction
-            if (products.length === 0) {
-                logger.warn('Flipkart: No products found with standard selectors, trying manual extraction');
+            const extract = () => {
+                let results = [];
+                for (const containerSelector of containerSelectors) {
+                    try {
+                        const containers = document.querySelectorAll(containerSelector);
+                        if (containers.length > 0) {
+                            const found = extractProducts(
+                                containerSelector,
+                                {
+                                    title: Array.isArray(this.selectors.results.title) 
+                                        ? this.selectors.results.title[0] 
+                                        : this.selectors.results.title,
+                                    price: Array.isArray(this.selectors.results.price) 
+                                        ? this.selectors.results.price[0] 
+                                        : this.selectors.results.price,
+                                    link: Array.isArray(this.selectors.results.link) 
+                                        ? this.selectors.results.link[0] 
+                                        : this.selectors.results.link,
+                                    image: Array.isArray(this.selectors.results.image) 
+                                        ? this.selectors.results.image[0] 
+                                        : this.selectors.results.image,
+                                    rating: Array.isArray(this.selectors.results.rating) 
+                                        ? this.selectors.results.rating[0] 
+                                        : this.selectors.results.rating,
+                                    reviews: '._13vcmD',
+                                }
+                            );
+                            if (found.length > 0) {
+                                results = found;
+                                logger.info(`Flipkart: Successfully extracted ${found.length} products with selector: ${containerSelector}`);
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        logger.warn(`Flipkart: Selector ${containerSelector} failed`, { error: e.message });
+                    }
+                }
+                return results;
+            };
+
+            try {
+                await waitForCondition(async () => {
+                    products = extract();
+                    return products.length > 0;
+                }, { timeout: 5000, interval: 500 });
+            } catch (e) {
+                logger.warn('Flipkart: Wait for products timed out, trying manual extraction');
                 products = this._manualExtractProducts();
             }
             
             // Filter out sponsored items
             const nonSponsored = products.filter((product, index) => {
-                const containers = document.querySelectorAll(this.selectors.results.container[0] || this.selectors.results.container);
+                // ... same as before
+                const selector = Array.isArray(this.selectors.results.container) ? this.selectors.results.container[0] : this.selectors.results.container;
+                const containers = document.querySelectorAll(selector);
                 const container = containers[index];
-                if (!container) return false;
+                if (!container) return true; // keep if container not found
                 
-                // Check for sponsored indicators
+                const text = container.textContent || container.innerText || '';
                 const isSponsored = 
-                    container.innerText.includes('Sponsored') ||
-                    container.textContent.includes('Sponsored') ||
-                    container.innerText.includes('Ad') ||
-                    container.textContent.includes('Ad') ||
-                    container.querySelector('[class*="sponsored"]') ||
-                    container.querySelector('[class*="ad"]') ||
-                    container.closest('[class*="sponsored"]') ||
-                    container.closest('[class*="ad"]');
+                    text.includes('Sponsored') ||
+                    text.includes('Ad') ||
+                    container.querySelector('[class*="sponsored" i]') ||
+                    container.querySelector('[class*="ad" i]') ||
+                    container.closest('[class*="sponsored" i]') ||
+                    container.closest('[class*="ad" i]');
                 
                 if (isSponsored) {
-                    logger.info('Flipkart: Filtered out sponsored product', {
-                        title: product.title?.substring(0, 50),
-                        index: index
-                    });
+                    logger.info('Flipkart: Filtered out sponsored product', { title: product.title });
                 }
                 
                 return !isSponsored;
-            });
-            
-            logger.info('Flipkart: Filtered sponsored products', {
-                total: products.length,
-                nonSponsored: nonSponsored.length
             });
             
             // Ensure all products are plain serializable objects
@@ -354,5 +350,26 @@ export class FlipkartPlatform extends EcommercePlatform {
         await clickBuyNow({ button: this.selectors.product.buyNow });
         return true;
     }
-}
 
+    async sortResults(sortOption) {
+        try {
+            // Mapping intent sorts to Flipkart native sort options
+            const sortMap = {
+                'price_low': 'price_asc',
+                'price_high': 'price_desc',
+                'relevance': 'relevance',
+                'newest': 'newest'
+            };
+            
+            const flipkartSort = sortMap[sortOption] || sortOption;
+
+            await sortResults(flipkartSort, {
+                dropdown: '._10W_6G, select' // Flipkart usually has a sort bar or dropdown
+            });
+            return true;
+        } catch (error) {
+            logger.error('Flipkart: Failed to sort results', error);
+            return false;
+        }
+    }
+}

@@ -78,23 +78,29 @@ export function matchesFilters(product, filters = {}) {
     // Storage filter (e.g., "128gb", "256gb")
     if (filters.storage) {
         const storageLower = filters.storage.toLowerCase().replace(/\s+/g, '');
-        // Extract storage from title (e.g., "128gb", "256gb")
-        const storageMatch = title.match(/(\d+)\s*(?:gb|gigabytes?|tb|terabytes?)/i);
-        if (!storageMatch) {
-            logger.debug('Product filtered out: storage not found', { 
+        // Extract all potential storage strings from title
+        const matches = [...title.matchAll(/(\d+)\s*(?:gb|gigabytes?|tb|terabytes?)/gi)];
+        
+        if (matches.length === 0) {
+            logger.debug('Product matching storage check: storage not in title, accepting anyway', { 
                 storage: filters.storage,
                 title: product.title?.substring(0, 50)
             });
-            return false;
-        }
-        const productStorage = storageMatch[0].toLowerCase().replace(/\s+/g, '');
-        if (!productStorage.includes(storageLower.replace(/\s+/g, ''))) {
-            logger.debug('Product filtered out: storage mismatch', { 
-                required: filters.storage,
-                found: storageMatch[0],
-                title: product.title?.substring(0, 50)
+            // Don't reject if not in title
+        } else {
+            const hasMatch = matches.some(match => {
+                const productStorage = match[0].toLowerCase().replace(/\s+/g, '');
+                return productStorage.includes(storageLower);
             });
-            return false;
+
+            if (!hasMatch) {
+                logger.debug('Product filtered out: storage mismatch', { 
+                    required: filters.storage,
+                    found: matches.map(m => m[0]),
+                    title: product.title?.substring(0, 50)
+                });
+                return false;
+            }
         }
     }
     
@@ -104,22 +110,23 @@ export function matchesFilters(product, filters = {}) {
         // Extract RAM from title (e.g., "6gb ram", "8gb ram")
         const ramMatch = title.match(/(\d+)\s*(?:gb|gigabytes?)\s*(?:ram|memory)/i);
         if (!ramMatch) {
-            logger.debug('Product filtered out: RAM not found', { 
+            logger.debug('Product matching RAM check: RAM not in title, accepting anyway', { 
                 ram: filters.ram,
                 title: product.title?.substring(0, 50)
             });
-            return false;
-        }
-        const productRam = ramMatch[0].toLowerCase().replace(/\s+/g, '');
-        const requiredRam = parseInt(ramLower.replace(/gb/i, ''));
-        const foundRam = parseInt(ramMatch[1]);
-        if (foundRam < requiredRam) {
-            logger.debug('Product filtered out: RAM too low', { 
-                required: filters.ram,
-                found: ramMatch[0],
-                title: product.title?.substring(0, 50)
-            });
-            return false;
+            // Don't reject if not in title, might be in description/attributes
+        } else {
+            const productRam = ramMatch[0].toLowerCase().replace(/\s+/g, '');
+            const requiredRam = parseInt(ramLower.replace(/gb/i, ''));
+            const foundRam = parseInt(ramMatch[1]);
+            if (foundRam < requiredRam) {
+                logger.debug('Product filtered out: RAM too low', { 
+                    required: filters.ram,
+                    found: ramMatch[0],
+                    title: product.title?.substring(0, 50)
+                });
+                return false;
+            }
         }
     }
     
@@ -127,20 +134,21 @@ export function matchesFilters(product, filters = {}) {
     if (filters.battery) {
         const batteryMatch = title.match(/(\d+)\s*(?:mah|mAh|battery)/i);
         if (!batteryMatch) {
-            logger.debug('Product filtered out: battery not found', { 
+            logger.debug('Product matching battery check: battery not in title, accepting anyway', { 
                 battery: filters.battery,
                 title: product.title?.substring(0, 50)
             });
-            return false;
-        }
-        const foundBattery = parseInt(batteryMatch[1]);
-        if (foundBattery < filters.battery) {
-            logger.debug('Product filtered out: battery too low', { 
-                required: filters.battery,
-                found: foundBattery,
-                title: product.title?.substring(0, 50)
-            });
-            return false;
+            // Don't reject if not in title, might be in description/attributes
+        } else {
+            const foundBattery = parseInt(batteryMatch[1]);
+            if (foundBattery < filters.battery) {
+                logger.debug('Product filtered out: battery too low', { 
+                    required: filters.battery,
+                    found: foundBattery,
+                    title: product.title?.substring(0, 50)
+                });
+                return false;
+            }
         }
     }
     
@@ -182,9 +190,61 @@ function parseRating(ratingStr) {
 }
 
 /**
+ * Rank products based on intent (cheapest, best rated, etc.)
+ */
+export function rankResults(products, intent = {}) {
+    const { sortStrategy = 'relevant', urgency = 'none' } = intent;
+    
+    logger.info('Ranking products', { count: products.length, strategy: sortStrategy });
+
+    return [...products].sort((a, b) => {
+        const priceA = parsePrice(a.price);
+        const priceB = parsePrice(b.price);
+        const ratingA = parseRating(a.rating);
+        const ratingB = parseRating(b.rating);
+
+        // 1. Primary Strategy
+        if (sortStrategy === 'cheapest') {
+            if (priceA !== priceB) return priceA - priceB;
+        } else if (sortStrategy === 'best_rated') {
+            if (ratingA !== ratingB) return ratingB - ratingA;
+        }
+
+        // 2. Secondary: If equal, prefer higher rating
+        if (ratingA !== ratingB) return ratingB - ratingA;
+
+        // 3. Tertiary: If still equal, prefer lower price
+        return priceA - priceB;
+    });
+}
+
+/**
+ * Perform strict regex-based verification of attributes
+ */
+export function verifyAttributes(product, attributes = {}) {
+    const title = (product.title || '').toLowerCase();
+    const results = { matches: true, failures: [] };
+
+    for (const [key, value] of Object.entries(attributes)) {
+        if (!value) continue;
+
+        const valStr = value.toString().toLowerCase();
+        // Regex for the value with word boundaries, handling units
+        const regex = new RegExp(`\\b${valStr.replace(/(\d+)([a-z]+)/, '$1\\s*$2')}\\b`, 'i');
+        
+        if (!regex.test(title)) {
+            results.matches = false;
+            results.failures.push(`${key}: ${value}`);
+        }
+    }
+
+    return results;
+}
+
+/**
  * Filter products based on criteria
  */
-export function filterProducts(products, filters = {}) {
+export function filterProducts(products, filters = {}, intent = {}) {
     if (!filters || Object.keys(filters).length === 0) {
         return products;
     }

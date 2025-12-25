@@ -85,12 +85,19 @@ class Analytics {
      * Get session ID
      */
     _getSessionId() {
-        let sessionId = sessionStorage.getItem('analytics_session_id');
-        if (!sessionId) {
-            sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            sessionStorage.setItem('analytics_session_id', sessionId);
+        try {
+            if (typeof sessionStorage !== 'undefined') {
+                let sessionId = sessionStorage.getItem('analytics_session_id');
+                if (!sessionId) {
+                    sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                    sessionStorage.setItem('analytics_session_id', sessionId);
+                }
+                return sessionId;
+            }
+        } catch (e) {
+            // sessionStorage not available
         }
-        return sessionId;
+        return 'no_session';
     }
 
     /**

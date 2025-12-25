@@ -6,6 +6,7 @@ import { FlipkartPlatform } from './platforms/flipkart-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
 import { navigateToFlipkartLogin, clickFlipkartLoginButton, enterFlipkartPhoneNumber, sendFlipkartOTP, checkFlipkartLoginProgress } from './shared/login-handlers.js';
+import { filterProducts, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
 
 // Register Flipkart platform
 const flipkartPlatform = new FlipkartPlatform();
@@ -54,8 +55,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 let filteredProducts = products;
                 if (request.filters && Object.keys(request.filters).length > 0) {
                     try {
-                        const { filterProducts, isUnavailable, matchesFilters } = await import('../lib/product-matcher.js');
-                        
                         // First pass: filter out unavailable
                         filteredProducts = products.filter(item => !isUnavailable(item));
                         

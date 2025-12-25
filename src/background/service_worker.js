@@ -2,16 +2,10 @@ import { generateContent, listModels } from '../lib/gemini.js';
 import { logger } from '../lib/logger.js';
 import { ErrorHandler, IntentParseError, APIError } from '../lib/error-handler.js';
 import { retryAPICall } from '../lib/retry.js';
-import { platformRegistry } from '../lib/ecommerce-platforms.js';
+import { platformRegistry, EcommercePlatform } from '../lib/ecommerce-platforms.js';
 import { configManager } from '../lib/config.js';
-import { SearchFilter, ProductSorter, ProductComparator } from '../lib/search-filters.js';
 import { loginManager } from '../lib/login-manager.js';
-// Register platforms in service worker context
-// Since service worker and content scripts have separate contexts,
-// we need to register platforms here for the service worker to use
-
-// Import EcommercePlatform class
-import { EcommercePlatform } from '../lib/ecommerce-platforms.js';
+import { rankResults, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
 
 // Create minimal platform instances for service worker
 // Full implementations are in content scripts
@@ -51,12 +45,22 @@ class SWWalmartPlatform extends EcommercePlatform {
     }
 }
 
+class SWShopifyPlatform extends EcommercePlatform {
+    constructor() {
+        super('shopify', {
+            enabled: true,
+            domains: ['myshopify.com', 'shopify.com'],
+        });
+    }
+}
+
 // Register platforms immediately
 try {
     platformRegistry.register(new SWAmazonPlatform());
     platformRegistry.register(new SWFlipkartPlatform());
     platformRegistry.register(new SWEbayPlatform());
     platformRegistry.register(new SWWalmartPlatform());
+    platformRegistry.register(new SWShopifyPlatform());
     
     logger.info('Platforms registered in service worker', { 
         count: platformRegistry.getAll().length,
@@ -68,11 +72,22 @@ try {
 }
 
 // State management
-let currentState = {
+export let currentState = {
     status: 'IDLE', // IDLE, PARSING, SEARCHING, SELECTING, CHECKOUT, PROCESSING_PAYMENT, COMPLETED
     data: {},       // Parsed intent data
-    tabId: null
+    tabId: null,
+    filtersApplied: false
 };
+
+/**
+ * Reset state to IDLE
+ */
+export function resetState() {
+    currentState.status = 'IDLE';
+    currentState.data = {};
+    currentState.tabId = null;
+    currentState.filtersApplied = false;
+}
 
 // Initialize login manager
 loginManager.initialize().catch(error => {
@@ -161,7 +176,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-async function handleUserQuery(text) {
+export async function handleUserQuery(text) {
     try {
     // Clear previous logs on new request
         await logger.clearLogs();
@@ -204,8 +219,9 @@ async function handleUserQuery(text) {
             throw new IntentParseError('Could not understand the product to buy. Please rephrase your request.', text);
         }
 
-        currentState.data = intent;
+        currentState.data = { ...intent, originalQuery: text };
         currentState.status = 'SEARCHING';
+        currentState.filtersApplied = false;
 
         // Log filters if present
         if (intent.filters && Object.keys(intent.filters).length > 0) {
@@ -257,7 +273,7 @@ async function handleUserQuery(text) {
 /**
  * Simple string parser as fallback when LLM is unavailable
  */
-function parseIntentSimple(text) {
+export function parseIntentSimple(text) {
     const lowerText = text.toLowerCase();
     
     // Extract platform
@@ -353,7 +369,7 @@ function parseIntentSimple(text) {
     };
 }
 
-async function parseIntent(apiKey, text) {
+export async function parseIntent(apiKey, text) {
     // Set global logAction for gemini.js
     const { setLogAction } = await import('../lib/gemini.js');
     setLogAction(logAction);
@@ -366,8 +382,8 @@ async function parseIntent(apiKey, text) {
     - product: (string) The search query for the product (remove platform names like "amazon", "flipkart").
     - platform: (string, optional) Preferred ecommerce platform: "amazon", "flipkart", "ebay", "walmart", or null.
     - filters: (object) Key-value pairs for potential filters:
-      * price_min: (number) Minimum price in local currency (extract numbers only, no currency symbols)
-      * price_max: (number) Maximum price in local currency (extract numbers only, no currency symbols)
+      * price_min: (number) Minimum price in local currency
+      * price_max: (number) Maximum price in local currency
       * brand: (string) Brand name (e.g., "motorola", "samsung")
       * storage: (string) Storage capacity (e.g., "128gb", "256gb")
       * ram: (string) RAM capacity (e.g., "6gb", "8gb")
@@ -376,7 +392,9 @@ async function parseIntent(apiKey, text) {
       * category: (string) Product category
       * color: (string) Product color
       * condition: (string) Product condition (new, used, refurbished)
-    - sort: (string, optional) Sort option: "price_low", "price_high", "rating", "newest", "relevance"
+    - sortStrategy: (string, optional) User's priority: "cheapest", "best_rated", "relevant", "newest"
+    - urgency: (string, optional) "delivered_today", "within_week", "none"
+    - injectedKeywords: (array of strings) Technical terms or specific attributes from the prompt to add to the search bar for better precision (e.g., "M3 chip", "16GB RAM", "OLED").
     - delivery_location: (string) e.g., "home", "office".
     - payment_method: (string) e.g., "wallet", "card", "upi".
     - quantity: (number, optional) Quantity to purchase.
@@ -430,7 +448,7 @@ async function parseIntent(apiKey, text) {
     }
 }
 
-async function startAutomation() {
+export async function startAutomation() {
     try {
         // Determine platform
         const platformName = currentState.data.platform || 
@@ -482,6 +500,10 @@ async function executeSearchFallback(tabId) {
     const platform = currentState.platform;
     const platformName = platform ? platform.name : 'amazon';
     
+    // Get refined query
+    const refinedQuery = refineSearchQuery(currentState.data);
+    logger.info('Executing fallback search with refined query', { refinedQuery });
+
     // Try platform-specific selectors
     if (platformName === 'amazon') {
         await chrome.scripting.executeScript({
@@ -500,7 +522,7 @@ async function executeSearchFallback(tabId) {
                     }
                 }
             },
-            args: [currentState.data.product]
+            args: [refinedQuery]
         });
     } else if (platformName === 'flipkart') {
         await chrome.scripting.executeScript({
@@ -520,7 +542,7 @@ async function executeSearchFallback(tabId) {
                     }
                 }
             },
-            args: [currentState.data.product]
+            args: [refinedQuery]
         });
     } else {
         // Generic search - try common patterns
@@ -546,16 +568,64 @@ async function executeSearchFallback(tabId) {
                     }
                 }
             },
-            args: [currentState.data.product]
+            args: [refinedQuery]
         });
     }
     
     currentState.status = 'SELECTING';
     // Wait for search to complete
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
 }
 
-async function executeNextStep(tabId) {
+/**
+ * Refine search query with injected keywords and high-importance filters
+ * as requested by the user: "search the whole string along with the filter key values appended"
+ */
+function refineSearchQuery(data) {
+    // 1. Start with the whole original string as requested by the user
+    // This provides the most context to the platform's search engine
+    let refinedQuery = data.originalQuery || data.product || '';
+    
+    // Remove common stop words at the beginning that might confuse search
+    refinedQuery = refinedQuery.replace(/^(buy|find|search for|look for|get|i want to buy|show me|i need)\s+/i, '');
+
+    // 2. Add high-importance filters to search query if not already present
+    // This follows the user request to have filter key values appended
+    const filters = data.filters || {};
+    const filterValues = [];
+    
+    if (filters.brand) filterValues.push(filters.brand);
+    if (filters.ram) filterValues.push(filters.ram);
+    if (filters.storage) filterValues.push(filters.storage);
+    if (filters.battery) filterValues.push(`${filters.battery}mah`);
+    if (filters.price_max) filterValues.push(`under ${filters.price_max}`);
+    
+    // Add injected keywords from LLM
+    if (data.injectedKeywords && Array.isArray(data.injectedKeywords)) {
+        data.injectedKeywords.forEach(keyword => {
+            if (keyword && !filterValues.some(v => v.toLowerCase() === keyword.toLowerCase())) {
+                filterValues.push(keyword);
+            }
+        });
+    }
+
+    // Append filter values ONLY if they aren't already mentioned in the query
+    const lowerQuery = refinedQuery.toLowerCase();
+    filterValues.forEach(val => {
+        const valStr = val.toString().toLowerCase();
+        // Check if value is already in query (handle "6gb" matching "6 gb ram")
+        const valClean = valStr.replace(/\s+/g, '');
+        const queryClean = lowerQuery.replace(/\s+/g, '');
+        
+        if (!queryClean.includes(valClean)) {
+            refinedQuery += ` ${val}`;
+        }
+    });
+    
+    return refinedQuery.trim();
+}
+
+export async function executeNextStep(tabId) {
     if (tabId !== currentState.tabId) return;
 
     if (currentState.status === 'SEARCHING') {
@@ -573,6 +643,11 @@ async function executeNextStep(tabId) {
                 // We are on homepage, search for product using platform-specific method
                 logAction("Executing Search...", 'info');
                 
+                // Refine query with context
+                const searchData = { ...currentState.data };
+                searchData.product = refineSearchQuery(searchData);
+                logger.info('Refined search query', { original: currentState.data.product, refined: searchData.product });
+
                 // Use platform's search method via content script
                 try {
                     const searchResponsePromise = () => {
@@ -583,9 +658,9 @@ async function executeNextStep(tabId) {
                             
                             chrome.tabs.sendMessage(tabId, { 
                                 action: 'SEARCH', 
-                                query: currentState.data.product,
-                                filters: currentState.data.filters || {},
-                                sort: currentState.data.sort || null
+                                query: searchData.product,
+                                filters: searchData.filters || {},
+                                sort: searchData.sort || null
                             }, (response) => {
                                 clearTimeout(timeout);
                                 if (chrome.runtime.lastError) {
@@ -602,73 +677,7 @@ async function executeNextStep(tabId) {
                     if (searchResponse && searchResponse.success) {
                         logger.info('Search executed successfully');
                         currentState.status = 'SELECTING';
-                        // Wait for search results page to load
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                        
-                        // Apply filters after search if not already applied
-                        const filters = currentState.data.filters || {};
-                        if (Object.keys(filters).length > 0) {
-                            logger.info('Applying filters after search', { filters });
-                            logAction('Applying filters to search results...', 'info');
-                            try {
-                                const filterResponse = await new Promise((resolve, reject) => {
-                                    const timeout = setTimeout(() => {
-                                        logger.warn('Filter application response timeout');
-                                        resolve({ success: true, timeout: true });
-                                    }, 25000); // 25s timeout for filters
-                                    
-                                    chrome.tabs.sendMessage(tabId, {
-                                        action: 'APPLY_FILTERS',
-                                        filters: filters
-                                    }, (response) => {
-                                        clearTimeout(timeout);
-                                        if (chrome.runtime.lastError) {
-                                            logger.warn('Filter message error', { error: chrome.runtime.lastError.message });
-                                            resolve({ success: true, error: chrome.runtime.lastError.message });
-                                        } else {
-                                            resolve(response);
-                                        }
-                                    });
-                                });
-                                
-                                if (filterResponse && (filterResponse.success || filterResponse.timeout)) {
-                                    logger.info('Filters applied, waiting for page to reload', { filters });
-                                    logAction('Filters applied, waiting for results...', 'info');
-                                    // Wait longer for filters to take effect and page to update
-                                    await new Promise(resolve => setTimeout(resolve, 5000));
-                                } else {
-                                    logger.warn('Filter application returned failure', { response: filterResponse });
-                                    logAction('Some filters may not have been applied', 'warn');
-                                    await new Promise(resolve => setTimeout(resolve, 3000));
-                                }
-                            } catch (filterError) {
-                                logger.warn('Failed to apply filters after search', { error: filterError.message });
-                                logAction(`Filter application note: ${filterError.message}`, 'warn');
-                                await new Promise(resolve => setTimeout(resolve, 3000));
-                            }
-                        }
-
-                        // Request search results from content script AFTER filters are applied
-                        const response = await new Promise((resolve, reject) => {
-                            const timeout = setTimeout(() => {
-                                reject(new Error('Timeout waiting for search results'));
-                            }, 10000);
-                            
-                            logger.info('Requesting search results from content script', { tabId });
-                            chrome.tabs.sendMessage(tabId, {
-                                action: 'GET_SEARCH_RESULTS',
-                                filters: filters
-                            }, (response) => {
-                                clearTimeout(timeout);
-                                if (chrome.runtime.lastError) {
-                                    reject(new Error(chrome.runtime.lastError.message));
-                                } else {
-                                    resolve(response);
-                                }
-                            });
-                        });
-                        
-                        const items = response ? response.items : [];
+                        // Page loaded event will trigger next step
                     } else {
                         logger.warn('Search response indicates failure, using fallback', { response: searchResponse });
                         // Fallback to direct DOM manipulation
@@ -678,50 +687,6 @@ async function executeNextStep(tabId) {
                     logger.warn('Platform search method failed, using fallback', { error: searchError.message });
                     // Fallback to direct DOM manipulation
                     await executeSearchFallback(tabId);
-                    
-                    // Apply filters after fallback search too
-                    const filters = currentState.data.filters || {};
-                    if (Object.keys(filters).length > 0) {
-                        logger.info('Applying filters after fallback search', { filters });
-                        logAction('Applying filters to search results...', 'info');
-                        try {
-                            await new Promise(resolve => setTimeout(resolve, 4000)); // Wait for search results
-                            
-                            const filterResponse = await new Promise((resolve, reject) => {
-                                const timeout = setTimeout(() => {
-                                    logger.warn('Filter application response timeout after fallback');
-                                    resolve({ success: true, timeout: true });
-                                }, 25000);
-                                
-                                chrome.tabs.sendMessage(tabId, {
-                                    action: 'APPLY_FILTERS',
-                                    filters: filters
-                                }, (response) => {
-                                    clearTimeout(timeout);
-                                    if (chrome.runtime.lastError) {
-                                        logger.warn('Filter message error after fallback', { error: chrome.runtime.lastError.message });
-                                        resolve({ success: true, error: chrome.runtime.lastError.message });
-                                    } else {
-                                        resolve(response);
-                                    }
-                                });
-                            });
-                            
-                            if (filterResponse && (filterResponse.success || filterResponse.timeout)) {
-                                logger.info('Filters applied successfully after fallback', { filters });
-                                logAction('Filters applied, waiting for results...', 'info');
-                                await new Promise(resolve => setTimeout(resolve, 5000));
-                            } else {
-                                logger.warn('Filter application returned failure after fallback', { response: filterResponse });
-                                logAction('Some filters may not have been applied', 'warn');
-                                await new Promise(resolve => setTimeout(resolve, 3000));
-                            }
-                        } catch (filterError) {
-                            logger.warn('Failed to apply filters after fallback search', { error: filterError.message });
-                            logAction(`Filter application note: ${filterError.message}`, 'warn');
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                        }
-                    }
                 }
             }
         } catch (error) {
@@ -733,10 +698,51 @@ async function executeNextStep(tabId) {
     else if (currentState.status === 'SELECTING') {
         logAction('Analyzing search results...', 'info');
 
-        // Wait a bit for page to fully load
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // 1. Check if we need to apply filters first
+        const filters = currentState.data.filters || {};
+        if (Object.keys(filters).length > 0 && !currentState.filtersApplied) {
+            logger.info('Applying filters in SELECTING state', { filters });
+            logAction('Applying filters to search results...', 'info');
+            
+            try {
+                // Set flag BEFORE applying to avoid infinite loop on page reloads
+                currentState.filtersApplied = true;
+                
+                const filterResponse = await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        logger.warn('Filter application response timeout in SELECTING');
+                        resolve({ success: true, timeout: true });
+                    }, 25000);
+                    
+                    chrome.tabs.sendMessage(tabId, {
+                        action: 'APPLY_FILTERS',
+                        filters: filters
+                    }, (response) => {
+                        clearTimeout(timeout);
+                        if (chrome.runtime.lastError) {
+                            logger.warn('Filter message error in SELECTING', { error: chrome.runtime.lastError.message });
+                            resolve({ success: true, error: chrome.runtime.lastError.message });
+                        } else {
+                            resolve(response);
+                        }
+                    });
+                });
+                
+                if (filterResponse && (filterResponse.success || filterResponse.timeout)) {
+                    logger.info('Filters applied, waiting for results...', { filters });
+                    logAction('Filters applied, waiting for results...', 'info');
+                    // Page might reload, wait for it
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    // No need to continue here, next PAGE_LOADED will trigger again
+                    return;
+                }
+            } catch (filterError) {
+                logger.warn('Failed to apply filters in SELECTING', { error: filterError.message });
+                logAction('Proceeding without some filters...', 'warn');
+            }
+        }
 
-        // Get results from content script
+        // 2. Get results from content script
         try {
             logger.info('Requesting search results from content script', { tabId });
             
@@ -844,142 +850,37 @@ async function executeNextStep(tabId) {
             if (items.length > 0) {
                 try {
                     const filters = currentState.data.filters || {};
-                    logger.info('Starting product matching', { 
+                    const intent = {
+                        sortStrategy: currentState.data.sortStrategy,
+                        urgency: currentState.data.urgency
+                    };
+
+                    logger.info('Starting product matching and ranking', { 
                         totalProducts: items.length,
-                        filters: Object.keys(filters)
+                        filters: Object.keys(filters),
+                        intent
                     });
                     
-                    // Second-level matching: Try each product until we find one that matches filters
+                    // 1. Programmatic Ranking based on intent (cheapest, etc.)
+                    const rankedItems = rankResults(items, intent);
+                    
+                    // 2. Second-level matching: Try each product until we find one that matches filters
                     let bestItem = null;
                     let itemIndex = 0;
                     
-                    // We check title/attributes from the product data objects returned from content script
-                    while (itemIndex < items.length && !bestItem) {
-                        const item = items[itemIndex];
+                    while (itemIndex < rankedItems.length && !bestItem) {
+                        const item = rankedItems[itemIndex];
                         
                         // Skip if no link
                         if (!item.link || item.link === '') {
-                            logger.debug('Skipping product - no link', { index: itemIndex });
                             itemIndex++;
                             continue;
                         }
                         
-                        // Check if product matches filters based on title/attributes
-                        let matches = true;
-                        const title = (item.title || '').toLowerCase();
+                        // Check if product matches filters using robust product-matcher
+                        const matches = matchesFilters(item, filters);
                         
-                        // Skip sponsored results if they weren't already filtered (extra check)
-                        if (title.includes('sponsored') || title.includes(' ad ')) {
-                            logger.debug('Skipping product - appears sponsored', { index: itemIndex, title: title.substring(0, 40) });
-                            itemIndex++;
-                            continue;
-                        }
-
-                        // Brand check
-                        if (filters.brand && matches) {
-                            const brandLower = filters.brand.toLowerCase().trim();
-                            const brandWords = brandLower.split(/\s+/);
-                            const hasBrand = brandWords.some(word => title.includes(word));
-                            
-                            // Check for conflicting brands
-                            const conflictingBrands = ['samsung', 'apple', 'iphone', 'macbook', 'xiaomi', 'redmi', 'oneplus', 'oppo', 'vivo', 'realme', 'nokia', 'lg', 'sony', 'lenovo', 'hp', 'dell', 'asus', 'acer'];
-                            const mentionedBrands = conflictingBrands.filter(brand => 
-                                brand !== brandLower && 
-                                brand !== 'macbook' && 
-                                title.includes(brand)
-                            );
-                            
-                            if (!hasBrand || (mentionedBrands.length > 0 && !title.includes(brandLower))) {
-                                logger.info('Product failed brand check', {
-                                    title: item.title?.substring(0, 60),
-                                    requiredBrand: filters.brand
-                                });
-                                matches = false;
-                            }
-                        }
-                        
-                        // Storage check
-                        if (filters.storage && matches) {
-                            const storageLower = filters.storage.toLowerCase().replace(/\s+/g, '');
-                            const storageVal = parseInt(storageLower.replace(/\D/g, ''));
-                            
-                            // Extract storage from title
-                            const storageMatch = title.match(/(\d+)\s*(?:gb|gigabytes?|tb|terabytes?|ssd|hdd)/i);
-                            if (!storageMatch) {
-                                logger.debug('Product storage info not in title, accepting anyway', {
-                                    title: item.title?.substring(0, 60),
-                                    requiredStorage: filters.storage
-                                });
-                                // Don't reject if not in title, might be in description
-                            } else {
-                                const foundStorageVal = parseInt(storageMatch[1]);
-                                const foundUnit = storageMatch[0].toLowerCase();
-                                
-                                // Normalize to GB for comparison if needed
-                                let normalizedFound = foundStorageVal;
-                                if (foundUnit.includes('tb')) normalizedFound *= 1024;
-                                
-                                let normalizedRequired = storageVal;
-                                if (storageLower.includes('tb')) normalizedRequired *= 1024;
-
-                                if (normalizedFound < normalizedRequired) {
-                                    logger.debug('Product failed storage check - too low', {
-                                        title: item.title?.substring(0, 60),
-                                        required: normalizedRequired,
-                                        found: normalizedFound
-                                    });
-                                    matches = false;
-                                }
-                            }
-                        }
-                        
-                        // RAM check
-                        if (filters.ram && matches) {
-                            const ramLower = filters.ram.toLowerCase().replace(/\s+/g, '').replace(/morethan/i, '');
-                            const ramVal = parseInt(ramLower.replace(/\D/g, ''));
-                            
-                            const ramMatch = title.match(/(\d+)\s*(?:gb|gigabytes?)\s*(?:ram|memory|unified\s*memory)/i);
-                            if (!ramMatch) {
-                                logger.debug('Product RAM info not in title, accepting anyway', {
-                                    title: item.title?.substring(0, 60),
-                                    requiredRAM: filters.ram
-                                });
-                            } else {
-                                const foundRam = parseInt(ramMatch[1]);
-                                if (foundRam < ramVal) {
-                                    logger.debug('Product failed RAM check - too low', {
-                                        title: item.title?.substring(0, 60),
-                                        required: ramVal,
-                                        found: foundRam
-                                    });
-                                    matches = false;
-                                }
-                            }
-                        }
-                        
-                        // Battery check
-                        if (filters.battery && matches) {
-                            const batteryMatch = title.match(/(\d+)\s*(?:mah|mAh|battery)/i);
-                            if (!batteryMatch) {
-                                logger.debug('Product failed battery check - not found', {
-                                    title: item.title?.substring(0, 60),
-                                    requiredBattery: filters.battery
-                                });
-                                matches = false;
-                            } else {
-                                const foundBattery = parseInt(batteryMatch[1]);
-                                if (foundBattery < filters.battery) {
-                                    logger.debug('Product failed battery check - too low', {
-                                        title: item.title?.substring(0, 60),
-                                        requiredBattery: filters.battery,
-                                        foundBattery: foundBattery
-                                    });
-                                    matches = false;
-                                }
-                            }
-                        }
-                        
-                        if (matches) {
+                        if (matches && !isUnavailable(item)) {
                             bestItem = item;
                             logger.info('Found matching product', {
                                 title: item.title?.substring(0, 60),
@@ -990,9 +891,10 @@ async function executeNextStep(tabId) {
                             logAction(`Found matching product: ${item.title?.substring(0, 50)}`, 'info');
                             break;
                         } else {
-                            logger.info('Product does not match filters, trying next', {
+                            logger.info('Product does not match filters or is unavailable, trying next', {
                                 title: item.title?.substring(0, 60),
-                                index: itemIndex
+                                index: itemIndex,
+                                reason: isUnavailable(item) ? 'unavailable' : 'filter_mismatch'
                             });
                         }
                         

@@ -23,8 +23,11 @@ describe('Retry Logic', () => {
         });
 
         it('should retry on failure', async () => {
+            const networkError = new Error('network error');
+            networkError.name = 'NetworkError';
+            
             const fn = vi.fn()
-                .mockRejectedValueOnce(new Error('Fail 1'))
+                .mockRejectedValueOnce(networkError)
                 .mockResolvedValue('success');
 
             const promise = retryWithBackoff(fn, new RetryConfig({ maxRetries: 2, initialDelay: 100 }));
@@ -38,10 +41,14 @@ describe('Retry Logic', () => {
         });
 
         it('should fail after max retries', async () => {
-            const fn = vi.fn().mockRejectedValue(new Error('Always fails'));
-            const config = new RetryConfig({ maxRetries: 2, initialDelay: 100 });
+            vi.useRealTimers();
+            const networkError = new Error('network error');
+            networkError.name = 'NetworkError';
+            
+            const fn = vi.fn().mockRejectedValue(networkError);
+            const config = new RetryConfig({ maxRetries: 2, initialDelay: 10, maxDelay: 50 });
 
-            await expect(retryWithBackoff(fn, config)).rejects.toThrow('Always fails');
+            await expect(retryWithBackoff(fn, config)).rejects.toThrow('network error');
             expect(fn).toHaveBeenCalledTimes(3); // Initial + 2 retries
         });
     });

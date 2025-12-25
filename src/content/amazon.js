@@ -7,6 +7,7 @@ import { AmazonPlatform } from './platforms/amazon-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
 import { navigateToAmazonLogin, enterAmazonPhoneNumber, sendAmazonOTP, checkAmazonLoginProgress } from './shared/login-handlers.js';
+import { filterProducts, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
 
 // Register Amazon platform
 const amazonPlatform = new AmazonPlatform();
@@ -58,8 +59,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 let filteredProducts = products;
                 if (request.filters && Object.keys(request.filters).length > 0) {
                     try {
-                        const { filterProducts, isUnavailable, matchesFilters } = await import('../lib/product-matcher.js');
-                        
                         // First pass: filter out unavailable and sponsored
                         filteredProducts = products.filter(item => !isUnavailable(item));
                         

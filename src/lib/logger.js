@@ -54,110 +54,57 @@ class Logger {
         let safeError = null;
         if (error) {
             try {
-                // Use JSON.stringify/parse to safely serialize error
-                const errorStr = JSON.stringify(error, (key, value) => {
-                    // Skip DOM references and functions
-                    if (value && typeof value === 'object') {
-                        // Check if it's a DOM element
-                        if (value.nodeType !== undefined || value.tagName !== undefined) {
-                            return '[DOM Element]';
-                        }
-                        // Check if it's a window/document/navigator reference
-                        try {
-                            if (typeof window !== 'undefined' && value === window) return '[Browser Object]';
-                            if (typeof document !== 'undefined' && value === document) return '[Browser Object]';
-                            if (typeof navigator !== 'undefined' && value === navigator) return '[Browser Object]';
-                        } catch (e) {
-                            // Ignore errors accessing window/document/navigator
-                        }
-                    }
-                    if (typeof value === 'function') {
-                        return '[Function]';
-                    }
-                    return value;
-                });
-                const parsed = JSON.parse(errorStr);
-                safeError = {
-                    message: String(parsed.message || error.message || 'Unknown error'),
-                    stack: String(parsed.stack || error.stack || ''),
-                    name: String(parsed.name || error.name || 'Error')
-                };
-            } catch (e) {
-                // Fallback to simple string extraction
-                try {
+                if (error instanceof Error) {
                     safeError = {
                         message: String(error.message || 'Unknown error'),
+                        stack: String(error.stack || ''),
                         name: String(error.name || 'Error')
                     };
-                } catch (e2) {
+                } else if (typeof error === 'string') {
+                    safeError = { message: error, name: 'Error' };
+                } else {
+                    const errorStr = JSON.stringify(error, (key, value) => {
+                        if (value && typeof value === 'object') {
+                            try {
+                                if (value.nodeType !== undefined || value.tagName !== undefined) return '[DOM Element]';
+                                if (typeof globalThis.window !== 'undefined' && value === globalThis.window) return '[Browser Object]';
+                                if (typeof globalThis.document !== 'undefined' && value === globalThis.document) return '[Browser Object]';
+                                if (typeof globalThis.navigator !== 'undefined' && value === globalThis.navigator) return '[Browser Object]';
+                            } catch (e) { return '[Inaccessible Object]'; }
+                        }
+                        if (typeof value === 'function') return '[Function]';
+                        return value;
+                    });
+                    const parsed = JSON.parse(errorStr);
                     safeError = {
-                        message: 'Error serialization failed',
-                        name: 'SerializationError'
+                        message: String(parsed.message || error.message || 'Unknown error'),
+                        stack: String(parsed.stack || error.stack || ''),
+                        name: String(parsed.name || error.name || 'Error')
                     };
                 }
+            } catch (e) {
+                safeError = { message: 'Error serialization failed', name: 'Error' };
             }
         }
         
-        // Ensure data is serializable (no DOM references)
+        // Ensure data is serializable
         let safeData = {};
         try {
-            // Use JSON.stringify/parse to safely serialize data
             const dataStr = JSON.stringify(data, (key, value) => {
-                // Skip DOM references and functions
                 if (value && typeof value === 'object') {
-                    // Check if it's a DOM element
-                    if (value.nodeType !== undefined || value.tagName !== undefined) {
-                        return '[DOM Element]';
-                    }
-                    // Check if it's a window/document/navigator reference
                     try {
-                        if (typeof window !== 'undefined' && value === window) return '[Browser Object]';
-                        if (typeof document !== 'undefined' && value === document) return '[Browser Object]';
-                        if (typeof navigator !== 'undefined' && value === navigator) return '[Browser Object]';
-                    } catch (e) {
-                        // Ignore errors accessing window/document/navigator
-                    }
+                        if (value.nodeType !== undefined || value.tagName !== undefined) return '[DOM Element]';
+                        if (typeof globalThis.window !== 'undefined' && value === globalThis.window) return '[Browser Object]';
+                        if (typeof globalThis.document !== 'undefined' && value === globalThis.document) return '[Browser Object]';
+                        if (typeof globalThis.navigator !== 'undefined' && value === globalThis.navigator) return '[Browser Object]';
+                    } catch (e) { return '[Inaccessible Object]'; }
                 }
-                if (typeof value === 'function') {
-                    return '[Function]';
-                }
+                if (typeof value === 'function') return '[Function]';
                 return value;
             });
             safeData = JSON.parse(dataStr);
         } catch (e) {
-            // Fallback to manual serialization
-            try {
-                for (const [key, value] of Object.entries(data)) {
-                    if (value === null || value === undefined) {
-                        safeData[key] = value;
-                    } else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-                        safeData[key] = value;
-                    } else if (Array.isArray(value)) {
-                        safeData[key] = value.map(item => {
-                            if (typeof item === 'object' && item !== null) {
-                                return Object.keys(item).reduce((acc, k) => {
-                                    const v = item[k];
-                                    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-                                        acc[k] = v;
-                                    }
-                                    return acc;
-                                }, {});
-                            }
-                            return item;
-                        });
-                    } else if (typeof value === 'object') {
-                        safeData[key] = Object.keys(value).reduce((acc, k) => {
-                            const v = value[k];
-                            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-                                acc[k] = v;
-                            }
-                            return acc;
-                        }, {});
-                    }
-                }
-            } catch (e2) {
-                safeData._serializationError = 'Failed to serialize error data';
-            }
+            safeData = { _serializationError: 'Failed to serialize log data' };
         }
         
         const errorData = {
@@ -167,13 +114,11 @@ class Logger {
         
         this._log(LOG_LEVELS.ERROR, 'ERROR', message, errorData);
         
-        // Track error in analytics (lazy import to avoid circular dependency)
+        // Track error in analytics
         if (error) {
             import('./analytics.js').then(({ analytics }) => {
                 analytics.trackError(error, { message, ...safeData });
-            }).catch(() => {
-                // Analytics not available, ignore
-            });
+            }).catch(() => {});
         }
     }
 

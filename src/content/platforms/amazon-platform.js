@@ -3,10 +3,9 @@
  */
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow, applyFilters, sortResults } from '../shared/actions.js';
-import { findElement, safeClick, fillInput, getText } from '../shared/selectors.js';
+import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow, sortResults, discoverAvailableFilters } from '../shared/actions.js';
+import { safeClick, fillInput, getText } from '../shared/selectors.js';
 import { logger } from '../../lib/logger.js';
-import { retryDOMOperation } from '../../lib/retry.js';
 
 export class AmazonPlatform extends EcommercePlatform {
     constructor() {
@@ -84,17 +83,27 @@ export class AmazonPlatform extends EcommercePlatform {
 
     async getSearchResults() {
         try {
-            const products = extractProducts(
-                this.selectors.results.container,
-                {
-                    title: this.selectors.results.title,
-                    price: this.selectors.results.price,
-                    link: this.selectors.results.link,
-                    image: this.selectors.results.image,
-                    rating: this.selectors.results.rating,
-                    reviews: '.a-size-base',
-                }
-            );
+            logger.info('Amazon: Extracting products from page');
+            let products = [];
+            
+            try {
+                await waitForCondition(async () => {
+                    products = extractProducts(
+                        this.selectors.results.container,
+                        {
+                            title: this.selectors.results.title,
+                            price: this.selectors.results.price,
+                            link: this.selectors.results.link,
+                            image: this.selectors.results.image,
+                            rating: this.selectors.results.rating,
+                            reviews: '.a-size-base',
+                        }
+                    );
+                    return products.length > 0;
+                }, { timeout: 5000, interval: 500 });
+            } catch (e) {
+                logger.warn('Amazon: Wait for products timed out, using what we found so far', { found: products.length });
+            }
 
             // Filter out sponsored items - more comprehensive check
             const nonSponsored = products.filter((product, index) => {
@@ -103,13 +112,14 @@ export class AmazonPlatform extends EcommercePlatform {
                 if (!container) return false;
                 
                 // Check for sponsored indicators
+                const containerText = container.textContent || container.innerText || '';
                 const isSponsored = 
                     container.querySelector('.s-sponsored-label-text') ||
                     container.querySelector('[data-component-type="sp-sponsored-result"]') ||
                     container.querySelector('.s-sponsored-information') ||
                     container.closest('[data-component-type="sp-sponsored-result"]') ||
-                    container.innerText.includes('Sponsored') ||
-                    container.innerText.includes('Ad') ||
+                    containerText.includes('Sponsored') ||
+                    containerText.includes('Ad') ||
                     container.classList.contains('AdHolder') ||
                     container.getAttribute('data-ad-id') ||
                     container.querySelector('[data-ad-id]');
@@ -219,7 +229,7 @@ export class AmazonPlatform extends EcommercePlatform {
             return {
                 title,
                 price,
-                url: window.location.href,
+                url: globalThis.location.href,
             };
         } catch (error) {
             logger.error('Amazon: Failed to get product details', error);
@@ -236,225 +246,101 @@ export class AmazonPlatform extends EcommercePlatform {
                 return true;
             }
             
-            // Wait for page to fully load and filters sidebar to appear
+            // Wait for page to fully load
             await new Promise(resolve => setTimeout(resolve, 3000));
+            globalThis.scrollTo(0, 0);
             
-            // Scroll to top to ensure filters are visible
-            window.scrollTo(0, 0);
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
-            logger.info('Amazon: Page ready for filter application');
-            
-            // Apply price range filter
+            const initialUrl = globalThis.location.href;
+
+            // 1. Handle Price Range (usually inputs, high priority)
             if (filters.price_min || filters.price_max) {
                 try {
-                    // Amazon price filter is usually in a sidebar
-                    const priceContainer = document.querySelector('#p_36, [aria-label*="price"], .a-section[aria-label*="Price"]');
+                    const priceContainer = document.querySelector('#p_36, [aria-label*="price" i], .a-section[aria-label*="Price" i]');
                     if (priceContainer) {
-                        // Try to find price input fields
                         const minInput = priceContainer.querySelector('input[name="low-price"], input[placeholder*="Min"]');
                         const maxInput = priceContainer.querySelector('input[name="high-price"], input[placeholder*="Max"]');
                         
                         if (minInput && filters.price_min) {
-                            minInput.value = filters.price_min;
-                            minInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            minInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            logger.info('Amazon: Set min price', { price: filters.price_min });
+                            await fillInput(minInput, filters.price_min.toString());
                         }
-                        
                         if (maxInput && filters.price_max) {
-                            maxInput.value = filters.price_max;
-                            maxInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            maxInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            logger.info('Amazon: Set max price', { price: filters.price_max });
+                            await fillInput(maxInput, filters.price_max.toString());
                         }
                         
-                        // Try to find and click "Go" button
                         const goButton = priceContainer.querySelector('input[type="submit"], button, .a-button-input');
                         if (goButton) {
-                            await new Promise(resolve => setTimeout(resolve, 500));
-                            goButton.click();
-                            logger.info('Amazon: Clicked price filter apply button');
-                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            logger.info('Amazon: Clicking price filter Go button');
+                            await safeClick(goButton);
+                            await new Promise(resolve => setTimeout(resolve, 3000));
                         }
                     }
-                } catch (priceError) {
-                    logger.warn('Amazon: Failed to apply price filter', { error: priceError.message });
-                }
+                } catch (e) { logger.warn('Price filter failed', e); }
             }
+
+            // 2. Discover and apply other filters dynamically
+            let availableFilters = await discoverAvailableFilters();
             
-            // Apply brand filter
-            if (filters.brand) {
-                try {
-                    // Wait for brand filter section to load
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+            // Prioritize Brand
+            const keys = Object.keys(filters).sort((a, b) => {
+                if (a === 'brand') return -1;
+                if (b === 'brand') return 1;
+                return 0;
+            });
+
+            for (const key of keys) {
+                const value = filters[key];
+                if (!value || key.startsWith('price')) continue;
+
+                const targetLabels = [];
+                if (key === 'brand') targetLabels.push('brand', 'brands', 'brand name');
+                if (key === 'ram') targetLabels.push('ram', 'memory', 'internal memory', 'computer memory size');
+                if (key === 'storage') targetLabels.push('storage', 'internal storage', 'ssd capacity', 'hard disk size');
+                if (key === 'rating') targetLabels.push('customer review', 'avg. customer review', 'customer ratings');
+                if (key === 'color') targetLabels.push('color', 'colour');
+
+                let filterGroup = null;
+                for (const label of targetLabels) {
+                    if (availableFilters[label]) {
+                        filterGroup = availableFilters[label];
+                        break;
+                    }
+                }
+
+                if (filterGroup) {
+                    const valueStr = value.toString().toLowerCase();
+                    const cleanValue = valueStr.replace(/(\d+)([a-z]+)/, '$1 $2');
                     
-                    // Try multiple selectors for brand filter
-                    const brandSelectors = [
-                        '#p_89', // Brand filter container
-                        '#brandsRefinements',
-                        '[aria-label*="Brand"]',
-                        '[aria-label*="brand"]',
-                        '.a-checkbox[aria-label*="Brand"]',
-                        '.a-checkbox[aria-label*="brand"]',
-                        '[id*="brand"]'
-                    ];
-                    
-                    let brandApplied = false;
-                    const brandText = filters.brand.toLowerCase();
-                    
-                    logger.info('Amazon: Searching for brand filter', { brand: filters.brand, selectors: brandSelectors });
-                    
-                    for (const containerSelector of brandSelectors) {
-                        const brandContainer = document.querySelector(containerSelector);
-                        if (!brandContainer) {
-                            logger.debug('Amazon: Brand container not found', { selector: containerSelector });
-                            continue;
+                    const target = filterGroup.elements.find(el => {
+                        const itemText = el.text.toLowerCase();
+                        const itemTextClean = itemText.replace(/\s+/g, '');
+                        const valueClean = valueStr.replace(/\s+/g, '');
+                        
+                        return itemText.includes(valueStr) || 
+                               itemText.includes(cleanValue) || 
+                               itemTextClean.includes(valueClean) ||
+                               (key === 'ram' && itemText.includes(valueStr.replace('gb', '')) && itemText.includes('gb'));
+                    });
+
+                    if (target) {
+                        logger.info(`Amazon: Applying discovered filter ${key} -> ${target.text}`);
+                        const prevUrl = globalThis.location.href;
+                        await safeClick(target.element);
+                        
+                        // Wait and validate
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        if (globalThis.location.href === prevUrl) {
+                            logger.warn(`Amazon: Filter ${key} didn't trigger navigation, trying with dispatchEvent`);
+                            await safeClick(target.element, { useDispatchEvent: true });
+                            await new Promise(resolve => setTimeout(resolve, 3000));
                         }
-                        
-                        logger.info('Amazon: Found brand container', { selector: containerSelector });
-                        
-                        // Look for brand link/checkbox - try multiple approaches
-                        const allElements = brandContainer.querySelectorAll('a, span, label, .a-checkbox, input[type="checkbox"]');
-                        logger.info('Amazon: Found elements in brand container', { count: allElements.length });
-                        
-                        for (const el of allElements) {
-                            const text = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
-                            const brandWords = brandText.split(/\s+/);
-                            const matches = brandWords.some(word => text.includes(word));
-                            
-                            if (matches) {
-                                logger.info('Amazon: Found matching brand element', { 
-                                    text: text.substring(0, 50),
-                                    tagName: el.tagName,
-                                    className: el.className
-                                });
-                                
-                                // Try clicking
-                                try {
-                                    if (el.tagName === 'LABEL' || el.classList.contains('a-checkbox')) {
-                                        const checkbox = el.querySelector('input[type="checkbox"]') || el;
-                                        if (checkbox) {
-                                            checkbox.click();
-                                            brandApplied = true;
-                                        }
-                                    } else if (el.tagName === 'INPUT' && el.type === 'checkbox') {
-                                        if (!el.checked) {
-                                            el.click();
-                                            brandApplied = true;
-                                        }
-                                    } else {
-                                        el.click();
-                                        brandApplied = true;
-                                    }
-                                    
-                                    if (brandApplied) {
-                                        logger.info('Amazon: Applied brand filter', { brand: filters.brand, selector: containerSelector });
-                                        await new Promise(resolve => setTimeout(resolve, 2000));
-                                        break;
-                                    }
-                                } catch (clickError) {
-                                    logger.warn('Amazon: Failed to click brand element', { error: clickError.message });
-                                }
-                            }
-                        }
-                        
-                        if (brandApplied) break;
+
+                        // Rediscover after application as DOM changes
+                        availableFilters = await discoverAvailableFilters();
+                    } else {
+                        logger.warn(`Amazon: No matching element found for filter ${key} -> ${value}`, {
+                            availableOptions: filterGroup.elements.map(e => e.text)
+                        });
                     }
-                    
-                    if (!brandApplied) {
-                        logger.warn('Amazon: Brand filter not found', { brand: filters.brand });
-                    }
-                } catch (brandError) {
-                    logger.warn('Amazon: Failed to apply brand filter', { error: brandError.message });
-                }
-            }
-            
-            // Apply storage filter (if available in Amazon filters)
-            if (filters.storage) {
-                try {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    const storageText = filters.storage.replace(/gb/i, '').trim();
-                    const storageLink = Array.from(document.querySelectorAll('a, span, label')).find(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        // Support various labels like "256 GB", "256GB", "SSD 256GB"
-                        return (text.includes(`${storageText}gb`) || text.includes(`${storageText} gb`)) &&
-                               (el.closest('#p_n_feature_nine_browse-bin') || 
-                                el.closest('#p_n_feature_seven_browse-bin') ||
-                                el.closest('#p_n_feature_browse-bin') ||
-                                el.closest('[aria-label*="Storage"]') ||
-                                el.closest('[aria-label*="SSD"]'));
-                    });
-                    if (storageLink) {
-                        storageLink.click();
-                        logger.info('Amazon: Applied storage filter', { storage: filters.storage });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    }
-                } catch (storageError) {
-                    logger.warn('Amazon: Failed to apply storage filter', { error: storageError.message });
-                }
-            }
-            
-            // Apply RAM filter (if available in Amazon filters)
-            if (filters.ram) {
-                try {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    const ramText = filters.ram.replace(/gb/i, '').replace(/more than/i, '').trim();
-                    const ramLink = Array.from(document.querySelectorAll('a, span, label')).find(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        // Support "16 GB", "16GB", etc.
-                        return (text.includes(`${ramText}gb`) || text.includes(`${ramText} gb`)) &&
-                               (el.closest('#p_n_feature_eight_browse-bin') || 
-                                el.closest('#p_n_feature_five_browse-bin') ||
-                                el.closest('[aria-label*="RAM"]') ||
-                                el.closest('[aria-label*="Memory"]'));
-                    });
-                    if (ramLink) {
-                        ramLink.click();
-                        logger.info('Amazon: Applied RAM filter', { ram: filters.ram });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    }
-                } catch (ramError) {
-                    logger.warn('Amazon: Failed to apply RAM filter', { error: ramError.message });
-                }
-            }
-            
-            // Apply battery filter (if available in Amazon filters)
-            if (filters.battery) {
-                try {
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    const batteryText = filters.battery.toString();
-                    const batteryLink = Array.from(document.querySelectorAll('a, span, label')).find(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        return text.includes(`${batteryText}mah`) || text.includes(`${batteryText} mah`) &&
-                               (el.closest('[aria-label*="Battery"]') || el.closest('[aria-label*="battery"]'));
-                    });
-                    if (batteryLink) {
-                        batteryLink.click();
-                        logger.info('Amazon: Applied battery filter', { battery: filters.battery });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    }
-                } catch (batteryError) {
-                    logger.warn('Amazon: Failed to apply battery filter', { error: batteryError.message });
-                }
-            }
-            
-            // Apply rating filter
-            if (filters.rating) {
-                try {
-                    const ratingValue = Math.floor(filters.rating);
-                    const ratingLink = Array.from(document.querySelectorAll('a, span')).find(el => {
-                        const text = el.textContent || '';
-                        return text.includes(`${ratingValue} Star`) || text.includes(`${ratingValue}+`) &&
-                               (el.closest('#p_72') || el.closest('[aria-label*="Rating"]'));
-                    });
-                    if (ratingLink) {
-                        ratingLink.click();
-                        logger.info('Amazon: Applied rating filter', { rating: filters.rating });
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                    }
-                } catch (ratingError) {
-                    logger.warn('Amazon: Failed to apply rating filter', { error: ratingError.message });
                 }
             }
             
@@ -462,7 +348,6 @@ export class AmazonPlatform extends EcommercePlatform {
             return true;
         } catch (error) {
             logger.warn('Amazon: Failed to apply some filters', { error: error.message });
-            // Don't throw - filters are optional
             return true;
         }
     }
@@ -479,4 +364,3 @@ export class AmazonPlatform extends EcommercePlatform {
         }
     }
 }
-

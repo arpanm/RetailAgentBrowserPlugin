@@ -7,6 +7,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Mock the gemini module
 vi.mock('../../src/lib/gemini.js', () => ({
     generateContent: vi.fn(),
+    setLogAction: vi.fn(),
+    listModels: vi.fn(),
 }));
 
 import { generateContent } from '../../src/lib/gemini.js';
@@ -36,8 +38,11 @@ describe('Intent Parser', () => {
         // Import after mock
         const { parseIntent } = await import('../../src/background/service_worker.js');
         
-        // Note: This is a simplified test - actual implementation would need proper module structure
+        const result = await parseIntent('test-key', 'buy samsung phone under 50000');
+        
         expect(generateContent).toHaveBeenCalled();
+        expect(result.product).toBe('Samsung phone');
+        expect(result.filters.price_max).toBe(50000);
     });
 
     it('should handle invalid JSON response', async () => {
@@ -51,8 +56,13 @@ describe('Intent Parser', () => {
 
         generateContent.mockResolvedValue(mockResponse);
 
-        // Test would verify error handling
+        const { parseIntent } = await import('../../src/background/service_worker.js');
+        
+        // Should fallback to simple parser on invalid JSON
+        const result = await parseIntent('test-key', 'buy samsung phone');
+        
         expect(generateContent).toHaveBeenCalled();
+        expect(result.product).toBeTruthy();
     });
 });
 

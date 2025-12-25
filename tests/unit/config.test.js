@@ -18,7 +18,8 @@ global.chrome = {
 describe('ConfigManager', () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        configManager.config = { ...configManager.config };
+        // Deep copy config to avoid test interference
+        configManager.config = JSON.parse(JSON.stringify(configManager.config));
     });
 
     it('should get configuration value', () => {
@@ -33,12 +34,15 @@ describe('ConfigManager', () => {
     });
 
     it('should check if feature is enabled', () => {
-        configManager.config.features = { testFeature: true };
+        configManager.config.features = { ...configManager.config.features, testFeature: true };
         expect(configManager.isFeatureEnabled('testFeature')).toBe(true);
     });
 
     it('should check if platform is enabled', () => {
-        configManager.config.platforms = { amazon: { enabled: true } };
+        configManager.config.platforms = { 
+            ...configManager.config.platforms,
+            amazon: { ...configManager.config.platforms.amazon, enabled: true } 
+        };
         expect(configManager.isPlatformEnabled('amazon')).toBe(true);
     });
 

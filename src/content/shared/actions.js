@@ -3,7 +3,7 @@
  */
 
 import { logger } from '../../lib/logger.js';
-import { findElement, safeClick, fillInput, scrollIntoView, getText, isVisible } from './selectors.js';
+import { findElement, safeClick, fillInput, scrollIntoView, getText } from './selectors.js';
 
 /**
  * Perform search on a page
@@ -59,9 +59,18 @@ export function extractProducts(containerSelector, productSelectors) {
         try {
             const found = document.querySelectorAll(selector);
             if (found.length > 0) {
-                containers = Array.from(found);
-                logger.debug(`Found ${containers.length} containers with selector: ${selector}`);
-                break;
+                // Filter out non-product items (like headers, carousels) if they have no title/link
+                const validContainers = Array.from(found).filter(el => {
+                    // Quick check if it's a likely product container
+                    const text = el.textContent || el.innerText || '';
+                    return el.querySelector('a') && (text.length > 5);
+                });
+                
+                if (validContainers.length > 0) {
+                    containers = validContainers;
+                    logger.debug(`Found ${containers.length} valid containers with selector: ${selector}`);
+                    break;
+                }
             }
         } catch (e) {
             logger.warn(`Selector failed: ${selector}`, { error: e.message });
@@ -143,11 +152,11 @@ export function extractProducts(containerSelector, productSelectors) {
             // Ensure link is absolute URL
             if (product.link && !product.link.startsWith('http')) {
                 try {
-                    if (typeof window !== 'undefined' && window.location) {
-                        product.link = new URL(product.link, window.location.origin).href;
+                    if (typeof globalThis !== 'undefined' && globalThis.location) {
+                        product.link = new URL(product.link, globalThis.location.origin).href;
                     } else {
                         // Platform-specific fallback
-                        const origin = window.location?.origin || 'https://www.flipkart.com';
+                        const origin = globalThis.location?.origin || 'https://www.flipkart.com';
                         product.link = product.link.startsWith('/') 
                             ? `${origin}${product.link}` 
                             : `${origin}/${product.link}`;
@@ -186,7 +195,7 @@ export async function clickProduct(productLink, options = {}) {
 
         // If productLink is a URL, navigate directly
         if (productLink.startsWith('http')) {
-            window.location.href = productLink;
+            globalThis.location.href = productLink;
             return;
         }
 
@@ -250,7 +259,7 @@ export async function clickBuyNow(buyNowSelectors, options = {}) {
         const startTime = Date.now();
         while (Date.now() - startTime < waitTimeout) {
             const rect = buyNowButton.getBoundingClientRect();
-            const style = window.getComputedStyle(buyNowButton);
+            const style = globalThis.getComputedStyle(buyNowButton);
             const isVisible = rect.width > 0 && rect.height > 0 && 
                             style.display !== 'none' && 
                             style.visibility !== 'hidden' && 
@@ -285,7 +294,7 @@ export async function clickBuyNow(buyNowSelectors, options = {}) {
                 buyNowButton.dispatchEvent(new MouseEvent('click', {
                     bubbles: true,
                     cancelable: true,
-                    view: window
+                    view: globalThis
                 }));
                 clicked = true;
                 logger.info('Buy Now clicked using MouseEvent');
@@ -377,13 +386,117 @@ async function selectOption(selector, value) {
 }
 
 /**
+ * Discover available filters on the current search results page semantically
+ * @returns {Promise<Object>} Map of filter labels to their control elements
+ */
+export async function discoverAvailableFilters() {
+    try {
+        logger.info('Discovering available filters on page...');
+        const discoveredFilters = {};
+
+        // 1. Identify common filter containers
+        const filterContainers = document.querySelectorAll([
+            '#s-refinements', // Amazon sidebar
+            '._1AtVbE', // Flipkart sidebar
+            '.filter-section',
+            '.sidebar-filter',
+            '[aria-label*="filter" i]',
+            '[aria-label*="refinement" i]',
+            '.refinement-section',
+            '#filters',
+            '#refinements'
+        ].join(', '));
+
+        if (filterContainers.length === 0) {
+            logger.warn('No common filter containers found');
+            return {};
+        }
+
+        // Expanded "See more" links if they exist to find more filters
+        const expanders = document.querySelectorAll('a[aria-expanded="false"], .s-expander-button, ._2Go1ky');
+        for (const expander of expanders) {
+            try {
+                if (getText(expander).toLowerCase().includes('more')) {
+                    expander.click();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        filterContainers.forEach(container => {
+            // 2. Identify filter groups within the container
+            const groups = container.querySelectorAll([
+                'div[id^="p_"]', // Amazon specific
+                '.a-section.a-spacing-none',
+                'section',
+                '.filter-group',
+                'div[class*="filter" i]',
+                'div[class*="refinement" i]',
+                '._213e_G', // Flipkart specific
+                '._2hb093'
+            ].join(', '));
+
+            groups.forEach(group => {
+                const header = group.querySelector('span.a-text-bold, h3, h4, h5, ._3V_o9G, [class*="header" i], b, strong');
+                let label = getText(header).trim().toLowerCase();
+                
+                if (!label) {
+                    label = group.getAttribute('aria-label') || group.id || '';
+                    label = label.replace(/[_-]/g, ' ').toLowerCase();
+                }
+
+                if (label && label.length > 2) {
+                    if (!discoveredFilters[label]) {
+                        discoveredFilters[label] = {
+                            elements: [],
+                            group: group,
+                            type: 'selection' // default
+                        };
+                    }
+
+                    // Check if it's a range filter (price)
+                    const inputs = group.querySelectorAll('input[type="number"], input[type="text"]');
+                    if (inputs.length >= 2) {
+                        discoveredFilters[label].type = 'range';
+                        discoveredFilters[label].inputs = Array.from(inputs);
+                        discoveredFilters[label].goButton = group.querySelector('input[type="submit"], button, .a-button-input');
+                    }
+
+                    // 3. Find interactive elements
+                    const items = group.querySelectorAll('a, input[type="checkbox"], input[type="radio"], label, button, [role="button"]');
+                    items.forEach(item => {
+                        const itemText = getText(item).trim();
+                        if (itemText) {
+                            discoveredFilters[label].elements.push({
+                                text: itemText.toLowerCase(),
+                                element: item,
+                                // Identify if it's a rating filter (e.g., "4 stars & up")
+                                isRating: itemText.includes('★') || /^\d\s*stars?/i.test(itemText) || item.querySelector('.a-icon-star')
+                            });
+                        }
+                    });
+                }
+            });
+        });
+
+        logger.info('Filters discovery completed', { 
+            foundCategories: Object.keys(discoveredFilters) 
+        });
+        return discoveredFilters;
+    } catch (error) {
+        logger.error('Filter discovery failed', error);
+        return {};
+    }
+}
+
+/**
  * Sort search results
  */
 export async function sortResults(sortOption, sortSelectors, options = {}) {
     try {
         logger.info('Sorting results', { sortOption });
 
-        const sortDropdown = await findElement(sortSelectors.dropdown, {
+        await findElement(sortSelectors.dropdown, {
             maxRetries: options.maxRetries || 2,
         });
 

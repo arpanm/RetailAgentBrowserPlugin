@@ -17,7 +17,8 @@ export class RetailAgentError extends Error {
 
 export class APIError extends RetailAgentError {
     constructor(message, statusCode, response = {}) {
-        super(message, `API_${statusCode}`, statusCode < 500, { statusCode, response });
+        const recoverable = statusCode >= 500 || statusCode === 429;
+        super(message, `API_${statusCode}`, recoverable, { statusCode, response });
         this.name = 'APIError';
         this.statusCode = statusCode;
     }
