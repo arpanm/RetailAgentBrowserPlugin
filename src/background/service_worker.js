@@ -78,7 +78,9 @@ export let currentState = {
     status: 'IDLE', // IDLE, PARSING, SEARCHING, SELECTING, CHECKOUT, PROCESSING_PAYMENT, COMPLETED
     data: {},       // Parsed intent data
     tabId: null,
-    filtersApplied: false
+    filtersApplied: false,
+    productPageRetries: 0,  // Track retries for product page actions
+    maxProductPageRetries: 3
 };
 
 /**
@@ -89,6 +91,7 @@ export function resetState() {
     currentState.data = {};
     currentState.tabId = null;
     currentState.filtersApplied = false;
+    currentState.productPageRetries = 0;
 }
 
 // Initialize login manager
@@ -1279,6 +1282,7 @@ export async function executeNextStep(tabId) {
                                 logAction(`Navigating to product page...`, 'info');
                                 
                                 currentState.status = 'PRODUCT_PAGE';
+                                currentState.productPageRetries = 0; // Reset retry counter for new product
                                 
                                 // Navigate using the same retry logic
                                 // (Navigation logic continues below...)
@@ -1356,6 +1360,7 @@ export async function executeNextStep(tabId) {
                     logAction(`Navigating to product page...`, 'info');
 
                 currentState.status = 'PRODUCT_PAGE';
+                    currentState.productPageRetries = 0; // Reset retry counter for new product
 
                     // Store selected product info for potential retry
                     currentState.selectedProduct = {
@@ -1516,28 +1521,57 @@ export async function executeNextStep(tabId) {
         }
     }
     else if (currentState.status === 'PRODUCT_PAGE') {
+        // Check retry limit first
+        if (currentState.productPageRetries >= currentState.maxProductPageRetries) {
+            logger.error('Max product page retries exceeded', { 
+                retries: currentState.productPageRetries,
+                maxRetries: currentState.maxProductPageRetries
+            });
+            logAction('Unable to complete purchase after 3 attempts. Please proceed manually:', 'error');
+            logAction('1. The product page is open in the tab', 'info');
+            logAction('2. Click "Buy Now" or "Add to Cart" manually', 'info');
+            logAction('3. Complete checkout on the website', 'info');
+            currentState.status = 'COMPLETED'; // Prevent further retries
+            return;
+        }
+        
         // Verify we're actually on a product page, not still on search results
         try {
             const tab = await chrome.tabs.get(tabId);
             const currentUrl = tab?.url || '';
             
-            logger.info('Verifying product page navigation', { currentUrl, tabId });
+            logger.info('Verifying product page navigation', { currentUrl, tabId, retryCount: currentState.productPageRetries });
+            
+            // Check if we're on checkout/cart page (Buy Now succeeded!)
+            const isCheckoutUrl = currentUrl.includes('/gp/buy/') ||
+                                 currentUrl.includes('/cart') ||
+                                 currentUrl.includes('/checkout') ||
+                                 currentUrl.includes('/spc/') ||  // Amazon checkout
+                                 currentUrl.includes('/buy/');
+            
+            if (isCheckoutUrl) {
+                logger.info('Successfully navigated to checkout/cart page!', { currentUrl });
+                logAction('✅ Buy Now successful! Navigated to checkout page.', 'info');
+                logAction('Please complete the checkout manually on the website.', 'info');
+                currentState.status = 'CHECKOUT_FLOW';
+                return;
+            }
             
             // Check if URL indicates we're still on search results
             const isSearchResultsUrl = currentUrl.includes('/s?') || 
                                        currentUrl.includes('/search?') ||
-                                       currentUrl.includes('/search/') ||
-                                       (currentUrl.includes('amazon.in') && !currentUrl.match(/\/(dp|gp\/product)\//)) ||
-                                       (currentUrl.includes('flipkart.com') && !currentUrl.includes('/p/'));
+                                       currentUrl.includes('/search/');
             
             if (isSearchResultsUrl) {
-                logger.warn('Still on search results page, navigation may have failed', { currentUrl });
-                logAction('Navigation verification: still on search results. Retrying...', 'warn');
+                logger.warn('Still on search results page, navigation may have failed', { currentUrl, retryCount: currentState.productPageRetries });
+                logAction(`Navigation verification: still on search results. Retry ${currentState.productPageRetries + 1}/${currentState.maxProductPageRetries}...`, 'warn');
+                
+                currentState.productPageRetries++;
                 
                 // Retry navigation if we have the product link stored
                 if (currentState.selectedProduct?.link) {
                     const productLink = currentState.selectedProduct.link;
-                    logger.info('Retrying navigation to product page', { productLink });
+                    logger.info('Retrying navigation to product page', { productLink, retry: currentState.productPageRetries });
                     
                     try {
                         // Try different navigation method
@@ -1557,8 +1591,12 @@ export async function executeNextStep(tabId) {
                         const retryUrl = retryTab?.url || '';
                         
                         if (retryUrl.includes('/s?') || retryUrl.includes('/search')) {
-                            logger.error('Navigation retry failed, still on search results', { retryUrl });
-                            logAction('Failed to navigate to product page after retry.', 'error');
+                            logger.error('Navigation retry failed, still on search results', { retryUrl, retry: currentState.productPageRetries });
+                            if (currentState.productPageRetries >= currentState.maxProductPageRetries) {
+                                logAction('Failed to navigate to product page after maximum retries.', 'error');
+                                logAction('Please navigate to the product manually and click Buy Now.', 'info');
+                                currentState.status = 'COMPLETED';
+                            }
                             return;
                         }
                         
@@ -1566,13 +1604,16 @@ export async function executeNextStep(tabId) {
                         
                     } catch (retryError) {
                         logger.error('Navigation retry failed', retryError);
-                        logAction('Failed to retry navigation', 'error');
+                        logAction(`Failed to retry navigation (attempt ${currentState.productPageRetries}/${currentState.maxProductPageRetries})`, 'error');
+                        if (currentState.productPageRetries >= currentState.maxProductPageRetries) {
+                            currentState.status = 'COMPLETED';
+                        }
                         return;
                     }
                 } else {
                     logger.error('No product link stored for retry');
                     logAction('Cannot retry navigation: no product link available', 'error');
-                    currentState.status = 'SELECTING';
+                    currentState.status = 'COMPLETED';
                     return;
                 }
             } else {
@@ -1661,43 +1702,94 @@ export async function executeNextStep(tabId) {
             logger.info('Buy Now response', { response });
             
             if (response && response.success) {
-                currentState.status = 'CHECKOUT_FLOW';
-                logAction('Clicked Buy Now. Proceeding to Checkout...', 'info');
-            } else {
-                logAction('Could not click "Buy Now" with rules. Asking AI to analyze page...', 'info');
-                const aiSucceeded = await performLLMPageAnalysis(tabId);
-                if (aiSucceeded) return;
-
-                logAction('AI could not find action. Trying Add to Cart as last resort...', 'warn');
-                // Try Add to Cart as fallback
+                // Wait a moment for navigation
                 await new Promise(resolve => setTimeout(resolve, 2000));
-                const cartResponse = await chrome.tabs.sendMessage(tabId, { action: 'ADD_TO_CART' });
-                if (cartResponse && cartResponse.success) {
-                    logAction('Added to cart successfully. Please proceed to checkout manually.', 'info');
-                } else {
-                    logAction('Could not add to cart. Product might be out of stock or require login.', 'warn');
+                
+                // Check if we navigated to checkout
+                try {
+                    const checkTab = await chrome.tabs.get(tabId);
+                    const checkUrl = checkTab?.url || '';
+                    
+                    const isCheckout = checkUrl.includes('/gp/buy/') ||
+                                      checkUrl.includes('/cart') ||
+                                      checkUrl.includes('/checkout') ||
+                                      checkUrl.includes('/spc/');
+                    
+                    if (isCheckout) {
+                currentState.status = 'CHECKOUT_FLOW';
+                        logAction('✅ Successfully navigated to checkout page!', 'info');
+                        logAction('Please complete the checkout manually on the website.', 'info');
+                        currentState.status = 'COMPLETED'; // Stop automation, user takes over
+                        return;
+            } else {
+                        logger.info('Buy Now clicked but not on checkout page', { currentUrl: checkUrl });
+                        logAction('Buy Now clicked. Waiting for checkout page...', 'info');
+                    }
+                } catch (urlCheckError) {
+                    logger.warn('Could not verify checkout navigation', { error: urlCheckError.message });
                 }
+            } else {
+                logAction('Could not click "Buy Now" with rules. Please click Buy Now manually.', 'warn');
+                currentState.productPageRetries++;
             }
             } catch (e) {
+            // Check if error is due to page navigation (expected after Buy Now click)
+            const isNavigationError = e.message && (
+                e.message.includes('back/forward cache') ||
+                e.message.includes('Receiving end does not exist') ||
+                e.message.includes('message channel is closed')
+            );
+            
+            if (isNavigationError) {
+                logger.info('Page navigated after Buy Now click (expected)', { error: e.message });
+                logAction('Buy Now clicked, checking navigation...', 'info');
+                
+                // Wait for navigation to complete
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // Check if we're on checkout page
+                try {
+                    const checkTab = await chrome.tabs.get(tabId);
+                    const checkUrl = checkTab?.url || '';
+                    
+                    const isCheckout = checkUrl.includes('/gp/buy/') ||
+                                      checkUrl.includes('/cart') ||
+                                      checkUrl.includes('/checkout') ||
+                                      checkUrl.includes('/spc/');
+                    
+                    if (isCheckout) {
+                        logAction('✅ Successfully navigated to checkout page!', 'info');
+                        logAction('Please complete the checkout manually on the website.', 'info');
+                        currentState.status = 'COMPLETED';
+                        return;
+                } else {
+                        logger.warn('Buy Now clicked but not on checkout page', { currentUrl: checkUrl });
+                        logAction('Buy Now may have failed. Please try manually.', 'warn');
+                        currentState.productPageRetries++;
+                        
+                        // Check if exceeded retries
+                        if (currentState.productPageRetries >= currentState.maxProductPageRetries) {
+                            logAction('Maximum retry attempts reached. Please complete purchase manually.', 'error');
+                            currentState.status = 'COMPLETED';
+                        }
+                    }
+                } catch (urlCheckError) {
+                    logger.error('Could not verify checkout navigation', urlCheckError);
+                    currentState.productPageRetries++;
+                }
+            } else {
             logger.error('Error clicking Buy Now', e, { 
                 errorMessage: e.message,
                 errorStack: e.stack 
             });
-            logAction(`Error clicking Buy Now: ${e.message}. Asking AI to analyze page...`, 'error');
-            
-            const aiSucceeded = await performLLMPageAnalysis(tabId);
-            if (aiSucceeded) return;
-
-            // Try Add to Cart as last fallback
-            try {
-                logAction('Trying Add to Cart as last resort...', 'info');
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                const cartResponse = await chrome.tabs.sendMessage(tabId, { action: 'ADD_TO_CART' });
-                if (cartResponse && cartResponse.success) {
-                    logAction('Added to cart successfully. Please proceed to checkout manually.', 'info');
+                logAction(`Error clicking Buy Now: ${e.message}`, 'error');
+                currentState.productPageRetries++;
+                
+                // Check if exceeded retries
+                if (currentState.productPageRetries >= currentState.maxProductPageRetries) {
+                    logAction('Maximum retry attempts reached. Please complete purchase manually.', 'error');
+                    currentState.status = 'COMPLETED';
                 }
-            } catch (cartError) {
-                logger.error('Add to Cart also failed', cartError);
             }
         }
     }

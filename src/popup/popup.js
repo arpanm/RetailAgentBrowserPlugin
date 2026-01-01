@@ -85,10 +85,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (result.chatHistory && Array.isArray(result.chatHistory)) {
         // Clear the default welcome message
         messagesDiv.innerHTML = '';
+        // Reset collapsible state
+        currentCollapsibleGroup = null;
+        collapsibleMessageCount = 0;
         // Load all previous messages
         result.chatHistory.forEach(msg => {
           appendMessage(msg.sender, msg.text, false); // false = don't save to storage (already saved)
         });
+        // Close any remaining collapsible group
+        if (currentCollapsibleGroup) {
+          currentCollapsibleGroup = null;
+          collapsibleMessageCount = 0;
+        }
         // Scroll to bottom
         scrollToBottom();
       }
@@ -99,6 +107,8 @@ document.addEventListener('DOMContentLoaded', () => {
   clearChatBtn.addEventListener('click', () => {
     if (confirm('Clear all messages and start over?')) {
       messagesDiv.innerHTML = '';
+      currentCollapsibleGroup = null;
+      collapsibleMessageCount = 0;
       chrome.storage.local.set({ chatHistory: [] }, () => {
         appendMessage('system', 'Chat cleared. How can I help you?');
       });
@@ -251,6 +261,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const text = userInput.value.trim();
     if (!text) return;
 
+    // Close any open collapsible group before new message
+    if (currentCollapsibleGroup) {
+      currentCollapsibleGroup = null;
+      collapsibleMessageCount = 0;
+    }
+
     // Add user message to chat
     appendMessage('user', text);
     userInput.value = '';
@@ -266,11 +282,93 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Track current collapsible group
+  let currentCollapsibleGroup = null;
+  let collapsibleMessageCount = 0;
+  
+  // Check if message is a final/important message (user needs to see)
+  const isFinalMessage = (text) => {
+    const finalPatterns = [
+      /^Searching for/,
+      /^Opening .* in a new tab/,
+      /^Found .* items/,
+      /^✅/,
+      /^Unable to complete/,
+      /^Please proceed manually/,
+      /^Please complete/,
+      /^Please click/,
+      /^Product might be/,
+      /^Added to cart successfully/,
+      /^Settings saved/,
+      /^Chat cleared/,
+      /^Logs exported/,
+      /^Available Models:/,
+      /^Maximum retry attempts reached/,
+      /^No suitable products found/,
+      /^All navigation methods failed/,
+    ];
+    return finalPatterns.some(pattern => pattern.test(text));
+  };
+  
+  // Messages that should be grouped as intermediate/collapsible
+  // Everything else that's a system message and NOT a final message
+  const isIntermediateMessage = (text, sender) => {
+    // User messages are never intermediate
+    if (sender !== 'system') return false;
+    
+    // Check if it's a final message first
+    if (isFinalMessage(text)) return false;
+    
+    // All other system messages are intermediate
+    return true;
+  };
+
   function appendMessage(sender, text, saveToStorage = true) {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `message ${sender}`;
-    msgDiv.textContent = text;
-    messagesDiv.appendChild(msgDiv);
+    // Close any open collapsible group for user messages
+    if (sender === 'user' && currentCollapsibleGroup) {
+      currentCollapsibleGroup = null;
+      collapsibleMessageCount = 0;
+    }
+    
+    // Check if this is an intermediate system message
+    if (isIntermediateMessage(text, sender)) {
+      // Create or add to collapsible group
+      if (!currentCollapsibleGroup) {
+        currentCollapsibleGroup = createCollapsibleGroup();
+        messagesDiv.appendChild(currentCollapsibleGroup.container);
+      }
+      
+      // Add message to collapsible content
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message ${sender} collapsible-message`;
+      msgDiv.textContent = text;
+      currentCollapsibleGroup.content.appendChild(msgDiv);
+      collapsibleMessageCount++;
+      
+      // Update summary with better descriptions
+      let summaryText = '';
+      if (collapsibleMessageCount === 1) {
+        summaryText = 'Processing...';
+      } else if (collapsibleMessageCount < 5) {
+        summaryText = `${collapsibleMessageCount} steps (click to expand)`;
+      } else {
+        summaryText = `${collapsibleMessageCount} steps (click to expand)`;
+      }
+      currentCollapsibleGroup.summary.textContent = summaryText;
+    } else {
+      // Close any open collapsible group before adding final message
+      if (currentCollapsibleGroup) {
+        currentCollapsibleGroup = null;
+        collapsibleMessageCount = 0;
+      }
+      
+      // Regular message (final/important)
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message ${sender}`;
+      msgDiv.textContent = text;
+      messagesDiv.appendChild(msgDiv);
+    }
+    
     scrollToBottom();
 
     // Save to storage for persistence
@@ -285,6 +383,47 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.storage.local.set({ chatHistory: history });
       });
     }
+  }
+  
+  function createCollapsibleGroup() {
+    const container = document.createElement('div');
+    container.className = 'collapsible-group';
+    
+    const header = document.createElement('div');
+    header.className = 'collapsible-header';
+    
+    const icon = document.createElement('span');
+    icon.className = 'collapsible-icon';
+    icon.textContent = '🔄';
+    
+    const summary = document.createElement('span');
+    summary.className = 'collapsible-summary';
+    summary.textContent = 'Processing...';
+    
+    const toggle = document.createElement('button');
+    toggle.className = 'collapsible-toggle';
+    toggle.textContent = '▶';
+    toggle.setAttribute('aria-label', 'Expand details');
+    toggle.setAttribute('aria-expanded', 'false');
+    
+    const content = document.createElement('div');
+    content.className = 'collapsible-content collapsed';
+    
+    header.appendChild(toggle);
+    header.appendChild(icon);
+    header.appendChild(summary);
+    container.appendChild(header);
+    container.appendChild(content);
+    
+    // Toggle functionality
+    header.addEventListener('click', () => {
+      const isExpanded = content.classList.toggle('collapsed');
+      toggle.textContent = isExpanded ? '▶' : '▼';
+      toggle.setAttribute('aria-expanded', isExpanded ? 'false' : 'true');
+      scrollToBottom();
+    });
+    
+    return { container, header, summary, content };
   }
 
   function scrollToBottom() {
