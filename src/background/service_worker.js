@@ -576,8 +576,23 @@ async function executeSearchFallback(tabId) {
     }
     
     currentState.status = 'SELECTING';
-    // Wait for search to complete
+    
+    // For AJAX platforms (Flipkart, eBay), continue immediately after search
+    // For page reload platforms (Amazon), wait for PAGE_LOADED event
+    const usesAjax = ['flipkart', 'ebay'].includes(platformName);
+    
+    if (usesAjax) {
+        logger.info('Fallback: AJAX platform detected, continuing to SELECTING immediately', { platformName });
+        // Mark filters as already applied since search might apply them
+        currentState.filtersApplied = true;
+        // Wait for DOM to update, then continue
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        await executeNextStep(tabId);
+    } else {
+        // Wait for search to complete and PAGE_LOADED event to trigger
+        logger.info('Fallback: Page reload platform, waiting for PAGE_LOADED event', { platformName });
     await new Promise(resolve => setTimeout(resolve, 5000));
+    }
 }
 
 /**
@@ -589,8 +604,14 @@ function refineSearchQuery(data) {
     // This provides the most context to the platform's search engine
     let refinedQuery = data.originalQuery || data.product || '';
     
+    // Remove "undefined" prefix if it somehow got in
+    refinedQuery = refinedQuery.replace(/^undefined\s+/i, '');
+    
     // Remove common stop words at the beginning that might confuse search
     refinedQuery = refinedQuery.replace(/^(buy|find|search for|look for|get|i want to buy|show me|i need)\s+/i, '');
+    
+    // Remove platform references from query (e.g., "from flipkart", "from amazon", "on flipkart")
+    refinedQuery = refinedQuery.replace(/\b(from|on|at|in)\s+(flipkart|amazon|ebay|walmart|shopify|flipkaart)\b/gi, '');
 
     // Transform "greater than" / "less than" / "more than" into search-friendly terms
     // Handle cases like "greater than 5000", "more than 6gb", "above 4.5 rating"
@@ -614,8 +635,24 @@ function refineSearchQuery(data) {
     const filterValues = [];
     
     if (filters.brand) filterValues.push(filters.brand);
-    if (filters.ram) filterValues.push(`${filters.ram.toString().toUpperCase().replace(/\s/g, '')}`);
-    if (filters.storage) filterValues.push(`${filters.storage.toString().toUpperCase().replace(/\s/g, '')}`);
+    
+    // Normalize RAM value: remove "min", "minimum", "max", "maximum" prefixes
+    if (filters.ram) {
+        let ramValue = filters.ram.toString()
+            .replace(/\b(min|minimum|max|maximum|at least|greater than|more than)\s+/gi, '')
+            .toUpperCase()
+            .replace(/\s/g, '');
+        filterValues.push(ramValue);
+    }
+    
+    // Normalize storage value: remove "min", "minimum", "max", "maximum" prefixes  
+    if (filters.storage) {
+        let storageValue = filters.storage.toString()
+            .replace(/\b(min|minimum|max|maximum|at least|greater than|more than)\s+/gi, '')
+            .toUpperCase()
+            .replace(/\s/g, '');
+        filterValues.push(storageValue);
+    }
     if (filters.battery) filterValues.push(`${filters.battery}mAh`);
     if (filters.price_max) filterValues.push(`under ${filters.price_max}`);
     
@@ -654,10 +691,9 @@ function refineSearchQuery(data) {
         }
     });
     
-    // Add platform name if missing
-    if (data.platform && !lowerQuery.includes(data.platform.name)) {
-        refinedQuery = `${data.platform.name} ${refinedQuery}`;
-    }
+    // DON'T add platform name to search query - it's not needed for search
+    // and can confuse the platform's search engine
+    // Platform selection is already handled by which site we're on
     
     // Final check: Remove redundant units that might have been added
     refinedQuery = refinedQuery.replace(/\b(\d+)\s*(GB|MAH)\s+(\d+)\s*(?:GB|MAH)\b/gi, (match, p1, p2) => `${p1}${p2}`);
@@ -853,7 +889,23 @@ export async function executeNextStep(tabId) {
                     if (searchResponse && searchResponse.success) {
                         logger.info('Search executed successfully');
                         currentState.status = 'SELECTING';
-                        // Page loaded event will trigger next step
+                        
+                        // For AJAX platforms (Flipkart, eBay), continue immediately
+                        // For page reload platforms (Amazon), wait for PAGE_LOADED event
+                        const platformName = currentState.data.platform?.name || 'unknown';
+                        const usesAjax = ['flipkart', 'ebay'].includes(platformName);
+                        
+                        if (usesAjax) {
+                            logger.info('AJAX platform detected, continuing to SELECTING immediately', { platformName });
+                            // Mark filters as already applied since search() method applies them
+                            currentState.filtersApplied = true;
+                            // Wait a bit for DOM to update, then continue
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            await executeNextStep(tabId);
+                        } else {
+                            // Page reload platforms will trigger PAGE_LOADED event
+                            logger.info('Page reload platform, waiting for PAGE_LOADED event', { platformName });
+                        }
                     } else {
                         logger.warn('Search response indicates failure, using fallback', { response: searchResponse });
                         // Fallback to direct DOM manipulation
@@ -907,10 +959,22 @@ export async function executeNextStep(tabId) {
                 if (filterResponse && (filterResponse.success || filterResponse.timeout)) {
                     logger.info('Filters applied, waiting for results...', { filters });
                     logAction('Filters applied, waiting for results...', 'info');
-                    // Page might reload, wait for it
+                    
+                    // Check if platform uses AJAX (Flipkart, eBay) or page reload (Amazon)
+                    const platformName = currentState.data.platform?.name || 'unknown';
+                    const usesAjax = ['flipkart', 'ebay'].includes(platformName);
+                    
+                    if (usesAjax) {
+                        // For AJAX platforms, wait for DOM to update but don't return
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        logger.info('Filter applied via AJAX, continuing to get results...', { platformName });
+                        // Continue to get search results below
+                    } else {
+                        // For page reload platforms, wait for reload
                     await new Promise(resolve => setTimeout(resolve, 5000));
                     // No need to continue here, next PAGE_LOADED will trigger again
                     return;
+                    }
                 }
             } catch (filterError) {
                 logger.warn('Failed to apply filters in SELECTING', { error: filterError.message });
