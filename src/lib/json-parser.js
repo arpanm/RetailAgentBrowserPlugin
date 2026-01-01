@@ -215,3 +215,4 @@ export function validateJSONStructure(obj, requiredFields = []) {
     return true;
 }
 
+

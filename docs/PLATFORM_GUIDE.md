@@ -692,3 +692,4 @@ export class SimplePlatformPlatform extends EcommercePlatform {
 **Last Updated**: January 2026  
 **Version**: 1.0.0
 
+
