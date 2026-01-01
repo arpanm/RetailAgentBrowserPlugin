@@ -123,6 +123,18 @@ Enable/disable platforms in the settings:
 - Fill in the reason
 - Submit automatically
 
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+- **[Architecture Guide](docs/ARCHITECTURE.md)** - System architecture, components, and data flow
+- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** - Setup, development workflow, and contribution guidelines
+- **[API Documentation](docs/API_DOCUMENTATION.md)** - Complete API reference for all libraries
+- **[Platform Guide](docs/PLATFORM_GUIDE.md)** - How to add support for new e-commerce platforms
+- **[Features Documentation](docs/FEATURES.md)** - Detailed feature descriptions and implementation details
+- **[Quick Test Guide](docs/QUICK_TEST_GUIDE.md)** - Quick start testing guide for product comparison
+- **[Chrome Store Publishing](docs/CHROME_STORE_PUBLISHING.md)** - Guide for publishing to Chrome Web Store
+
 ## 🏗️ Architecture
 
 ### Project Structure
@@ -132,7 +144,8 @@ RetailAgent/
 │   ├── background/          # Service worker (background script)
 │   │   └── service_worker.js
 │   ├── content/             # Content scripts for each platform
-│   │   ├── amazon.js
+│   │   ├── *-loader.js      # ES6 module loaders
+│   │   ├── *.js             # Platform content scripts
 │   │   ├── platforms/      # Platform-specific implementations
 │   │   │   ├── amazon-platform.js
 │   │   │   ├── flipkart-platform.js
@@ -140,7 +153,8 @@ RetailAgent/
 │   │   │   └── walmart-platform.js
 │   │   └── shared/         # Shared utilities
 │   │       ├── selectors.js
-│   │       └── actions.js
+│   │       ├── actions.js
+│   │       └── login-handlers.js
 │   ├── lib/                 # Core libraries
 │   │   ├── gemini.js        # Gemini API integration
 │   │   ├── logger.js        # Logging system
@@ -148,17 +162,26 @@ RetailAgent/
 │   │   ├── retry.js         # Retry logic
 │   │   ├── config.js        # Configuration management
 │   │   ├── ecommerce-platforms.js  # Platform abstraction
-│   │   ├── store-locator.js # Store locator service
-│   │   ├── address-manager.js      # Address management
-│   │   ├── payment-manager.js      # Payment method management
-│   │   └── order-tracker.js        # Order tracking
+│   │   ├── product-matcher.js       # Product matching
+│   │   ├── product-comparator.js    # Product comparison
+│   │   ├── page-analyzer.js         # LLM page analysis
+│   │   ├── sponsored-detector.js     # Sponsored product detection
+│   │   ├── store-locator.js         # Store locator service
+│   │   ├── address-manager.js       # Address management
+│   │   ├── payment-manager.js       # Payment method management
+│   │   └── order-tracker.js         # Order tracking
 │   └── popup/               # Extension popup UI
 │       ├── index.html
 │       ├── popup.js
 │       └── styles.css
 ├── icons/                   # Extension icons
 ├── docs/                    # Documentation
-│   └── index.html          # Landing page
+│   ├── ARCHITECTURE.md      # Architecture documentation
+│   ├── DEVELOPER_GUIDE.md   # Developer guide
+│   ├── API_DOCUMENTATION.md # API reference
+│   ├── PLATFORM_GUIDE.md    # Platform development guide
+│   ├── FEATURES.md          # Features documentation
+│   └── ...                  # More documentation
 ├── tests/                   # Test files
 │   ├── unit/
 │   ├── integration/
@@ -176,6 +199,10 @@ RetailAgent/
 3. **State Machine**: Manages shopping flow states (searching, selecting, checkout, etc.)
 4. **Error Handling**: Comprehensive error recovery and user-friendly messages
 5. **Retry Logic**: Exponential backoff for API calls and DOM operations
+6. **Product Comparison**: Multi-platform product comparison with intelligent scoring
+7. **Sponsored Detection**: Filters out sponsored/advertisement products
+
+For detailed architecture information, see [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## 🛠️ Development
 
@@ -210,34 +237,15 @@ npm run format
 
 ### Adding a New Platform
 
-1. Create platform class extending `EcommercePlatform`:
-   ```javascript
-   // src/content/platforms/newplatform-platform.js
-   import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-   
-   export class NewPlatformPlatform extends EcommercePlatform {
-     constructor() {
-       super('newplatform', {
-         domains: ['newplatform.com'],
-         selectors: { /* ... */ }
-       });
-     }
-     // Implement required methods
-   }
-   ```
+See the comprehensive [Platform Development Guide](docs/PLATFORM_GUIDE.md) for detailed instructions.
 
-2. Register platform in content script:
-   ```javascript
-   import { NewPlatformPlatform } from './platforms/newplatform-platform.js';
-   import { platformRegistry } from '../../lib/ecommerce-platforms.js';
-   
-   const platform = new NewPlatformPlatform();
-   platformRegistry.register(platform);
-   ```
-
+Quick steps:
+1. Create platform class extending `EcommercePlatform`
+2. Create content script and loader
 3. Update `manifest.json` with host permissions
+4. Register platform in service worker
 
-4. Add platform to configuration
+For complete guide with examples, see [PLATFORM_GUIDE.md](docs/PLATFORM_GUIDE.md).
 
 ## 📝 Chrome Web Store Publishing
 
@@ -288,13 +296,19 @@ See [Chrome Web Store Developer Documentation](https://developer.chrome.com/docs
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions are welcome! Please see the [Developer Guide](docs/DEVELOPER_GUIDE.md) for detailed contribution guidelines.
 
+Quick start:
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+3. Make your changes following the [code style guidelines](docs/DEVELOPER_GUIDE.md#code-style-guidelines)
+4. Write tests for your changes
+5. Update documentation if needed
+6. Commit your changes (`git commit -m 'feat: Add amazing feature'`)
+7. Push to the branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
+
+For detailed development workflow, see [DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md).
 
 ## 📄 License
 
@@ -309,8 +323,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 - **Issues**: [GitHub Issues](https://github.com/yourusername/RetailAgent/issues)
-- **Email**: support@retailagent.com
-- **Documentation**: [Full Documentation](https://retailagent.com/docs)
+- **Documentation**: See [`docs/`](docs/) directory for comprehensive documentation
+  - [Architecture Guide](docs/ARCHITECTURE.md)
+  - [Developer Guide](docs/DEVELOPER_GUIDE.md)
+  - [API Documentation](docs/API_DOCUMENTATION.md)
+  - [Platform Guide](docs/PLATFORM_GUIDE.md)
+  - [Features Documentation](docs/FEATURES.md)
 
 ## 🗺️ Roadmap
 

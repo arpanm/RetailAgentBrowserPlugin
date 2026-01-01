@@ -11,10 +11,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const checkModelsBtn = document.getElementById('check-models');
   const closeSettingsBtn = document.getElementById('close-settings');
   const loginPlatformsBtn = document.getElementById('login-platforms-btn');
+  
+  // Comparison preference sliders
+  const priceWeightSlider = document.getElementById('price-weight');
+  const ratingWeightSlider = document.getElementById('rating-weight');
+  const deliveryWeightSlider = document.getElementById('delivery-weight');
+  const availabilityWeightSlider = document.getElementById('availability-weight');
+  
+  const priceWeightValue = document.getElementById('price-weight-value');
+  const ratingWeightValue = document.getElementById('rating-weight-value');
+  const deliveryWeightValue = document.getElementById('delivery-weight-value');
+  const availabilityWeightValue = document.getElementById('availability-weight-value');
 
   // Load settings
   if (chrome && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(['geminiApiKey', 'phoneNumber', 'loggedInPlatforms'], (result) => {
+    chrome.storage.local.get(['geminiApiKey', 'phoneNumber', 'loggedInPlatforms', 'retailAgentConfig'], (result) => {
       if (result.geminiApiKey) {
         apiKeyInput.value = result.geminiApiKey;
       } else {
@@ -24,6 +35,20 @@ document.addEventListener('DOMContentLoaded', () => {
       
       if (result.phoneNumber) {
         phoneNumberInput.value = result.phoneNumber;
+      }
+      
+      // Load comparison preferences
+      if (result.retailAgentConfig && result.retailAgentConfig.comparisonPreferences) {
+        const prefs = result.retailAgentConfig.comparisonPreferences;
+        priceWeightSlider.value = (prefs.priceWeight * 100) || 40;
+        ratingWeightSlider.value = (prefs.ratingWeight * 100) || 30;
+        deliveryWeightSlider.value = (prefs.deliveryWeight * 100) || 20;
+        availabilityWeightSlider.value = (prefs.availabilityWeight * 100) || 10;
+        
+        priceWeightValue.textContent = `${priceWeightSlider.value}%`;
+        ratingWeightValue.textContent = `${ratingWeightSlider.value}%`;
+        deliveryWeightValue.textContent = `${deliveryWeightSlider.value}%`;
+        availabilityWeightValue.textContent = `${availabilityWeightSlider.value}%`;
       }
       
       // Load platform login status
@@ -140,6 +165,23 @@ document.addEventListener('DOMContentLoaded', () => {
     settingsModal.classList.add('hidden');
   });
 
+  // Slider event listeners to update display values
+  priceWeightSlider.addEventListener('input', (e) => {
+    priceWeightValue.textContent = `${e.target.value}%`;
+  });
+  
+  ratingWeightSlider.addEventListener('input', (e) => {
+    ratingWeightValue.textContent = `${e.target.value}%`;
+  });
+  
+  deliveryWeightSlider.addEventListener('input', (e) => {
+    deliveryWeightValue.textContent = `${e.target.value}%`;
+  });
+  
+  availabilityWeightSlider.addEventListener('input', (e) => {
+    availabilityWeightValue.textContent = `${e.target.value}%`;
+  });
+  
   saveSettingsBtn.addEventListener('click', () => {
     const key = apiKeyInput.value.trim();
     const phone = phoneNumberInput.value.trim();
@@ -152,13 +194,26 @@ document.addEventListener('DOMContentLoaded', () => {
       updates.phoneNumber = phone;
     }
     
-    if (Object.keys(updates).length > 0) {
-      chrome.storage.local.set(updates, () => {
-        alert('Settings saved!');
-        settingsModal.classList.add('hidden');
-        appendMessage('system', 'Settings saved successfully.');
-      });
-    }
+    // Save comparison preferences
+    chrome.storage.local.get(['retailAgentConfig'], (result) => {
+      const config = result.retailAgentConfig || {};
+      config.comparisonPreferences = {
+        priceWeight: parseInt(priceWeightSlider.value) / 100,
+        ratingWeight: parseInt(ratingWeightSlider.value) / 100,
+        deliveryWeight: parseInt(deliveryWeightSlider.value) / 100,
+        availabilityWeight: parseInt(availabilityWeightSlider.value) / 100
+      };
+      
+      updates.retailAgentConfig = config;
+      
+      if (Object.keys(updates).length > 0) {
+        chrome.storage.local.set(updates, () => {
+          alert('Settings saved!');
+          settingsModal.classList.add('hidden');
+          appendMessage('system', 'Settings saved successfully.');
+        });
+      }
+    });
   });
 
   // Platform login button
@@ -330,6 +385,21 @@ document.addEventListener('DOMContentLoaded', () => {
       collapsibleMessageCount = 0;
     }
     
+    // Handle comparison result messages specially
+    if (sender === 'comparison') {
+      // Close any open collapsible group
+      if (currentCollapsibleGroup) {
+        currentCollapsibleGroup = null;
+        collapsibleMessageCount = 0;
+      }
+      
+      // Create comparison card
+      const comparisonCard = createComparisonCard(text);
+      messagesDiv.appendChild(comparisonCard);
+      scrollToBottom();
+      return;
+    }
+    
     // Check if this is an intermediate system message
     if (isIntermediateMessage(text, sender)) {
       // Create or add to collapsible group
@@ -383,6 +453,78 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.storage.local.set({ chatHistory: history });
       });
     }
+  }
+  
+  /**
+   * Create a comparison card for displaying product comparison results
+   */
+  function createComparisonCard(text) {
+    const card = document.createElement('div');
+    card.className = 'comparison-card';
+    
+    // Parse the formatted text (it's markdown-like)
+    const lines = text.split('\n');
+    const html = [];
+    
+    html.push('<div class="comparison-header">📊 Product Comparison</div>');
+    html.push('<div class="comparison-body">');
+    
+    let inBestDeal = false;
+    let inAllOptions = false;
+    
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      
+      if (line.includes('**Best Deal:')) {
+        inBestDeal = true;
+        inAllOptions = false;
+        html.push('<div class="best-deal-section">');
+        html.push(`<div class="section-title">${line.replace(/\*\*/g, '')}</div>`);
+        continue;
+      }
+      
+      if (line.includes('**All Options:**')) {
+        if (inBestDeal) html.push('</div>'); // Close best deal section
+        inBestDeal = false;
+        inAllOptions = true;
+        html.push('<div class="all-options-section">');
+        html.push(`<div class="section-title">${line.replace(/\*\*/g, '')}</div>`);
+        continue;
+      }
+      
+      if (line.includes('---')) {
+        if (inBestDeal) html.push('</div>');
+        inBestDeal = false;
+        continue;
+      }
+      
+      // Format the line
+      let formattedLine = line
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/💰/g, '<span class="icon">💰</span>')
+        .replace(/⭐/g, '<span class="icon">⭐</span>')
+        .replace(/🚚/g, '<span class="icon">🚚</span>')
+        .replace(/💵/g, '<span class="icon">💵</span>')
+        .replace(/🎯/g, '<span class="icon">🎯</span>')
+        .replace(/✅/g, '<span class="icon">✅</span>')
+        .replace(/🥇/g, '<span class="rank gold">🥇</span>')
+        .replace(/🥈/g, '<span class="rank silver">🥈</span>')
+        .replace(/🥉/g, '<span class="rank bronze">🥉</span>');
+      
+      if (inAllOptions && (line.startsWith('🥇') || line.startsWith('🥈') || line.startsWith('🥉') || line.startsWith('▪️'))) {
+        html.push(`<div class="option-item">${formattedLine}</div>`);
+      } else {
+        html.push(`<div class="comparison-line">${formattedLine}</div>`);
+      }
+    }
+    
+    if (inBestDeal) html.push('</div>');
+    if (inAllOptions) html.push('</div>');
+    
+    html.push('</div>'); // Close comparison-body
+    
+    card.innerHTML = html.join('');
+    return card;
   }
   
   function createCollapsibleGroup() {

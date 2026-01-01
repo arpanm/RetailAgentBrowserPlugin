@@ -197,6 +197,63 @@ export class AmazonPlatform extends EcommercePlatform {
                     const asin = container.getAttribute('data-asin') || '';
                     
                     // Only add if has essential fields
+                    // Extract delivery information
+                    let delivery = null;
+                    try {
+                        const deliverySelectors = [
+                            '.s-result-item [data-cy="delivery-recipe"] span',
+                            '.s-result-item .a-text-bold:contains("Get it")',
+                            '.s-result-item span:contains("FREE delivery")',
+                            '.s-result-item span:contains("Delivery")',
+                            '.s-result-item .a-color-base.a-text-bold'
+                        ];
+                        
+                        for (const sel of deliverySelectors) {
+                            const deliveryElem = container.querySelector(sel);
+                            if (deliveryElem && deliveryElem.textContent) {
+                                const text = deliveryElem.textContent.trim();
+                                if (text.toLowerCase().includes('deliver') || 
+                                    text.toLowerCase().includes('get it') ||
+                                    text.match(/\d+\s*(day|week)/i)) {
+                                    delivery = text;
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        logger.debug('Failed to extract delivery', e);
+                    }
+                    
+                    // Extract availability information
+                    let availability = 'Unknown';
+                    try {
+                        const availabilitySelectors = [
+                            '.s-result-item .a-size-base.a-color-base',
+                            '.s-result-item .a-size-base.a-color-price',
+                            '.s-result-item span.a-color-success',
+                            '.s-result-item span.a-color-state'
+                        ];
+                        
+                        for (const sel of availabilitySelectors) {
+                            const availElem = container.querySelector(sel);
+                            if (availElem && availElem.textContent) {
+                                const text = availElem.textContent.trim().toLowerCase();
+                                if (text.includes('in stock') || text.includes('available')) {
+                                    availability = 'In Stock';
+                                    break;
+                                } else if (text.includes('out of stock') || text.includes('unavailable')) {
+                                    availability = 'Out of Stock';
+                                    break;
+                                } else if (text.includes('only') && text.includes('left')) {
+                                    availability = 'Limited Stock';
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        logger.debug('Failed to extract availability', e);
+                    }
+                    
                     if (title && link) {
                         products.push({
                             index: i,
@@ -207,7 +264,10 @@ export class AmazonPlatform extends EcommercePlatform {
                             rating,
                             reviews: '',
                             asin,
-                            sponsored: false
+                            sponsored: false,
+                            delivery,
+                            availability,
+                            platform: 'amazon'
                         });
                     }
                 } catch (error) {

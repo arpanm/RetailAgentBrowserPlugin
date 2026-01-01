@@ -7,6 +7,7 @@ import { configManager } from '../lib/config.js';
 import { loginManager } from '../lib/login-manager.js';
 import { rankResults, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
 import { analyzePage, ANALYSIS_MODES, extractAttributesWithLLM } from '../lib/page-analyzer.js';
+import { compareProducts, groupSimilarProducts, formatComparisonResult } from '../lib/product-comparator.js';
 
 
 // Create minimal platform instances for service worker
@@ -75,12 +76,16 @@ try {
 
 // State management
 export let currentState = {
-    status: 'IDLE', // IDLE, PARSING, SEARCHING, SELECTING, CHECKOUT, PROCESSING_PAYMENT, COMPLETED
+    status: 'IDLE', // IDLE, PARSING, SEARCHING, SELECTING, COMPARING, CHECKOUT, PROCESSING_PAYMENT, COMPLETED
     data: {},       // Parsed intent data
     tabId: null,
     filtersApplied: false,
     productPageRetries: 0,  // Track retries for product page actions
-    maxProductPageRetries: 3
+    maxProductPageRetries: 3,
+    // Comparison mode fields
+    compareMode: false,      // Whether to compare across platforms
+    platformResults: {},     // Results from each platform {platform: {products, tab}}
+    comparisonResult: null   // Final comparison result
 };
 
 /**
@@ -92,6 +97,10 @@ export function resetState() {
     currentState.tabId = null;
     currentState.filtersApplied = false;
     currentState.productPageRetries = 0;
+    // Reset comparison mode
+    currentState.compareMode = false;
+    currentState.platformResults = {};
+    currentState.comparisonResult = null;
 }
 
 // Initialize login manager
@@ -177,9 +186,148 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'PAGE_LOADED') {
         // Check state and execute next step
         logAction(`Page loaded: ${message.url}`);
+        
+        // COMPARISON MODE DISABLED - always use normal flow
+        // Normal flow for single-platform purchases
         executeNextStep(sender.tab.id);
     }
 });
+
+/**
+ * Handle page load events during comparison mode
+ * Triggers search on each platform and collects results
+ */
+async function handleComparisonPageLoad(tabId, url) {
+    try {
+        // Find which platform this tab belongs to
+        let platformName = null;
+        for (const [name, result] of Object.entries(currentState.platformResults)) {
+            if (result.tabId === tabId) {
+                platformName = name;
+                break;
+            }
+        }
+        
+        if (!platformName) {
+            logger.warn('Page loaded for unknown tab in comparison mode', { tabId, url });
+            return;
+        }
+        
+        const platformResult = currentState.platformResults[platformName];
+        
+        // Skip if already processed
+        if (platformResult.status === 'completed' || platformResult.status === 'searching') {
+            logger.debug(`Skipping ${platformName} - already ${platformResult.status}`);
+            return;
+        }
+        
+        // CRITICAL: Only trigger search on homepage, not on search results pages
+        const isSearchResultsPage = url.includes('/s?') || 
+                                     url.includes('/search?') || 
+                                     url.includes('/search/');
+        
+        if (isSearchResultsPage) {
+            logger.warn(`Skipping ${platformName} - already on search results page`, { url });
+            platformResult.status = 'error';
+            platformResult.error = 'Already on search results page';
+            return;
+        }
+        
+        // Only trigger on homepage
+        const isHomepage = (platformName === 'amazon' && (url === 'https://www.amazon.in/' || url.includes('amazon.in') && url.split('/').length <= 4)) ||
+                          (platformName === 'flipkart' && (url === 'https://www.flipkart.com/' || url.includes('flipkart.com') && url.split('/').length <= 4));
+        
+        if (!isHomepage) {
+            logger.warn(`Skipping ${platformName} - not on homepage`, { url });
+            return;
+        }
+        
+        logger.info(`Starting search on ${platformName} for comparison`, { tabId, url });
+        platformResult.status = 'searching';
+        
+        // Get refined query
+        const refinedQuery = refineSearchQuery(currentState.data);
+        
+        // Trigger search on this platform
+        try {
+            const searchResponse = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error('Search timeout'));
+                }, 45000);
+                
+                chrome.tabs.sendMessage(tabId, {
+                    action: 'SEARCH',
+                    query: refinedQuery,
+                    filters: currentState.data.filters || {},
+                    sort: currentState.data.sortStrategy || null
+                }, (response) => {
+                    clearTimeout(timeout);
+                    if (chrome.runtime.lastError) {
+                        reject(new Error(chrome.runtime.lastError.message));
+                    } else {
+                        resolve(response);
+                    }
+                });
+            });
+            
+            if (searchResponse && searchResponse.success) {
+                logger.info(`Search triggered on ${platformName}`, { tabId });
+                
+                // Wait for search to complete and page to load
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // Get search results
+                const resultsResponse = await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Get results timeout'));
+                    }, 20000);
+                    
+                    chrome.tabs.sendMessage(tabId, {
+                        action: 'GET_SEARCH_RESULTS',
+                        filters: currentState.data.filters || {}
+                    }, (response) => {
+                        clearTimeout(timeout);
+                        if (chrome.runtime.lastError) {
+                            reject(new Error(chrome.runtime.lastError.message));
+                        } else {
+                            resolve(response);
+                        }
+                    });
+                });
+                
+                if (resultsResponse && resultsResponse.items && resultsResponse.items.length > 0) {
+                    platformResult.products = resultsResponse.items;
+                    platformResult.status = 'completed';
+                    logger.info(`${platformName} search completed`, { 
+                        productCount: resultsResponse.items.length 
+                    });
+                } else {
+                    platformResult.products = [];
+                    platformResult.status = 'completed';
+                    logger.warn(`No products found on ${platformName}`);
+                }
+                
+                // Check if all platforms are done
+                executeNextStep(tabId);
+                
+            } else {
+                throw new Error('Search failed');
+            }
+            
+        } catch (error) {
+            logger.error(`Search failed on ${platformName}`, error);
+            platformResult.status = 'error';
+            platformResult.error = error.message;
+            platformResult.products = [];
+            
+            // Check if all platforms are done (even with errors)
+            executeNextStep(tabId);
+        }
+        
+    } catch (error) {
+        logger.error('Error in handleComparisonPageLoad', error);
+    }
+}
 
 export async function handleUserQuery(text) {
     try {
@@ -382,8 +530,9 @@ export async function parseIntent(apiKey, text) {
     You are a shopping assistant. Extract the following from the user's request.
     Return JSON ONLY. No markdown.
     Fields:
-    - product: (string) The search query for the product (remove platform names like "amazon", "flipkart").
+    - product: (string) The search query for the product (remove platform names like "amazon", "flipkart"). Remove words like "compare" from the product name.
     - platform: (string, optional) Preferred ecommerce platform: "amazon", "flipkart", "ebay", "walmart", or null.
+    - compareMode: (boolean) ALWAYS set to false. Multi-platform comparison is currently disabled.
     - filters: (object) Key-value pairs for potential filters:
       * price_min: (number) Minimum price in local currency
       * price_max: (number) Maximum price in local currency
@@ -453,7 +602,21 @@ export async function parseIntent(apiKey, text) {
 
 export async function startAutomation() {
     try {
-        // Determine platform
+        // COMPARISON MODE TEMPORARILY DISABLED - causes infinite loops
+        // Force disable comparison mode
+        currentState.compareMode = false;
+        currentState.platformResults = {};
+        currentState.comparisonResult = null;
+        currentState.data.compareMode = false;
+        
+        // Skip comparison mode even if requested
+        if (currentState.data.compareMode) {
+            logger.warn('Comparison mode requested but disabled due to bugs');
+            logAction('⚠️ Multi-platform comparison is temporarily disabled. Using single platform mode.', 'warn');
+            // Continue with normal single-platform flow
+        }
+        
+        // Regular single-platform mode
         const platformName = currentState.data.platform || 
                             (await configManager.get('preferredPlatform')) || 
                             'amazon';
@@ -494,6 +657,70 @@ export async function startAutomation() {
             platformName: currentState.data.platform,
             registeredPlatforms: Array.from(platformRegistry.getAll().map(p => p.name))
         });
+        throw error;
+    }
+}
+
+/**
+ * Start comparison mode - open tabs for multiple platforms
+ */
+async function startComparisonMode() {
+    try {
+        const platformsToCompare = ['amazon', 'flipkart'];
+        
+        // Create tabs for each platform
+        for (const platformName of platformsToCompare) {
+            try {
+                const platform = platformRegistry.get(platformName);
+                
+                let platformUrl;
+                if (platform.name === 'amazon') {
+                    platformUrl = 'https://www.amazon.in/';
+                } else if (platform.name === 'flipkart') {
+                    platformUrl = 'https://www.flipkart.com/';
+                } else {
+                    platformUrl = `https://www.${platform.config.domains[0]}/`;
+                }
+                
+                logger.info(`Opening ${platformName} for comparison`, { url: platformUrl });
+                logAction(`Opening ${platformName}...`, 'info');
+                
+                const tab = await chrome.tabs.create({ url: platformUrl, active: false });
+                
+                currentState.platformResults[platformName] = {
+                    platform,
+                    tabId: tab.id,
+                    products: null,
+                    status: 'loading'
+                };
+                
+                logger.info(`Tab created for ${platformName}`, { tabId: tab.id });
+                
+                // Small delay between tab creations
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+            } catch (error) {
+                logger.error(`Failed to open ${platformName}`, error);
+                currentState.platformResults[platformName] = {
+                    platform: null,
+                    tabId: null,
+                    products: null,
+                    status: 'error',
+                    error: error.message
+                };
+            }
+        }
+        
+        // Set status to COMPARING
+        currentState.status = 'COMPARING';
+        
+        logger.info('Comparison mode tabs created', { 
+            platforms: Object.keys(currentState.platformResults) 
+        });
+        
+    } catch (error) {
+        logger.error('Error in startComparisonMode', error);
+        logAction('Error starting comparison. Please try again.', 'error');
         throw error;
     }
 }
@@ -921,6 +1148,128 @@ export async function executeNextStep(tabId) {
             logger.error('Error in SEARCHING step', error);
             logAction('Error executing search.', 'error');
             return;
+        }
+    }
+    else if (currentState.status === 'COMPARING') {
+        // Handle multi-platform comparison mode
+        logger.info('Handling comparison mode', { 
+            platforms: Object.keys(currentState.platformResults) 
+        });
+        
+        try {
+            // Check if all platforms have completed their search
+            const platformNames = Object.keys(currentState.platformResults);
+            const allCompleted = platformNames.every(name => {
+                const result = currentState.platformResults[name];
+                return result.status === 'completed' || result.status === 'error';
+            });
+            
+            if (!allCompleted) {
+                logger.info('Waiting for all platforms to complete', { 
+                    statuses: platformNames.map(name => ({
+                        platform: name,
+                        status: currentState.platformResults[name].status
+                    }))
+                });
+                return; // Wait for all platforms
+            }
+            
+            // Collect all products from all platforms
+            const allProducts = [];
+            for (const platformName of platformNames) {
+                const result = currentState.platformResults[platformName];
+                if (result.products && result.products.length > 0) {
+                    allProducts.push(...result.products);
+                    logger.info(`Collected ${result.products.length} products from ${platformName}`);
+                }
+            }
+            
+            if (allProducts.length === 0) {
+                logger.warn('No products found across any platform');
+                logAction('❌ No products found matching your criteria on any platform.', 'error');
+                currentState.status = 'COMPLETED';
+                return;
+            }
+            
+            logger.info(`Total products for comparison: ${allProducts.length}`);
+            logAction(`Comparing ${allProducts.length} products...`, 'info');
+            
+            // Get user preferences for comparison
+            const preferences = await configManager.get('comparisonPreferences') || {
+                priceWeight: 0.4,
+                ratingWeight: 0.3,
+                deliveryWeight: 0.2,
+                availabilityWeight: 0.1
+            };
+            
+            // Run comparison
+            const comparisonResult = compareProducts({
+                products: allProducts,
+                preferences
+            });
+            
+            currentState.comparisonResult = comparisonResult;
+            
+            // Format and display results
+            const formattedResult = formatComparisonResult(comparisonResult);
+            logger.info('Comparison complete', { 
+                bestPlatform: comparisonResult.bestProduct.platform,
+                bestPrice: comparisonResult.bestProduct.price
+            });
+            
+            // Send results to popup for display
+            logAction(formattedResult, 'comparison');
+            
+            // Automatically proceed with best product
+            const bestProduct = comparisonResult.bestProduct;
+            const bestPlatformName = bestProduct.platform;
+            
+            logAction(`\n🎯 **Proceeding with ${bestPlatformName.toUpperCase()}** (Best Deal!)`, 'info');
+            
+            // Set up state to continue with the best platform
+            currentState.data.platform = bestPlatformName;
+            currentState.platform = currentState.platformResults[bestPlatformName].platform;
+            currentState.tabId = currentState.platformResults[bestPlatformName].tabId;
+            currentState.selectedProduct = bestProduct;
+            currentState.status = 'PRODUCT_PAGE';
+            
+            // Focus the selected tab
+            await chrome.tabs.update(currentState.tabId, { active: true });
+            
+            // Navigate to the product page
+            logger.info('Navigating to best product', { 
+                platform: bestPlatformName, 
+                productLink: bestProduct.link 
+            });
+            logAction(`Opening product: ${bestProduct.title.substring(0, 60)}...`, 'info');
+            
+            await chrome.tabs.update(currentState.tabId, { url: bestProduct.link });
+            
+            // Wait for page load
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Close other platform tabs
+            for (const platformName of platformNames) {
+                if (platformName !== bestPlatformName) {
+                    const otherTabId = currentState.platformResults[platformName].tabId;
+                    if (otherTabId) {
+                        try {
+                            await chrome.tabs.remove(otherTabId);
+                            logger.info(`Closed ${platformName} tab`, { tabId: otherTabId });
+                        } catch (e) {
+                            logger.debug(`Failed to close ${platformName} tab`, e);
+                        }
+                    }
+                }
+            }
+            
+            // Continue with Buy Now flow
+            await executeNextStep(currentState.tabId);
+            
+        } catch (error) {
+            logger.error('Error in comparison mode', error);
+            logAction('Error comparing products. Please try again.', 'error');
+            currentState.status = 'COMPLETED';
         }
     }
     else if (currentState.status === 'SELECTING') {
