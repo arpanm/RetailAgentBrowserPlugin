@@ -67,9 +67,9 @@ class Logger {
                         if (value && typeof value === 'object') {
                             try {
                                 if (value.nodeType !== undefined || value.tagName !== undefined) return '[DOM Element]';
-                                if (typeof globalThis.window !== 'undefined' && value === globalThis.window) return '[Browser Object]';
-                                if (typeof globalThis.document !== 'undefined' && value === globalThis.document) return '[Browser Object]';
-                                if (typeof globalThis.navigator !== 'undefined' && value === globalThis.navigator) return '[Browser Object]';
+                                if (typeof window !== 'undefined' && value === window) return '[Browser Object]';
+                                if (typeof document !== 'undefined' && value === document) return '[Browser Object]';
+                                if (typeof navigator !== 'undefined' && value === navigator) return '[Browser Object]';
                             } catch (e) { return '[Inaccessible Object]'; }
                         }
                         if (typeof value === 'function') return '[Function]';
@@ -94,9 +94,9 @@ class Logger {
                 if (value && typeof value === 'object') {
                     try {
                         if (value.nodeType !== undefined || value.tagName !== undefined) return '[DOM Element]';
-                        if (typeof globalThis.window !== 'undefined' && value === globalThis.window) return '[Browser Object]';
-                        if (typeof globalThis.document !== 'undefined' && value === globalThis.document) return '[Browser Object]';
-                        if (typeof globalThis.navigator !== 'undefined' && value === globalThis.navigator) return '[Browser Object]';
+                        if (typeof window !== 'undefined' && value === window) return '[Browser Object]';
+                        if (typeof document !== 'undefined' && value === document) return '[Browser Object]';
+                        if (typeof navigator !== 'undefined' && value === navigator) return '[Browser Object]';
                     } catch (e) { return '[Inaccessible Object]'; }
                 }
                 if (typeof value === 'function') return '[Function]';
@@ -114,11 +114,16 @@ class Logger {
         
         this._log(LOG_LEVELS.ERROR, 'ERROR', message, errorData);
         
-        // Track error in analytics
-        if (error) {
-            import('./analytics.js').then(({ analytics }) => {
-                analytics.trackError(error, { message, ...safeData });
-            }).catch(() => {});
+        // Track error in analytics (skip in service worker context)
+        if (error && typeof window !== 'undefined') {
+            // Only import analytics in non-service-worker context
+            try {
+                import('./analytics.js').then(({ analytics }) => {
+                    analytics.trackError(error, { message, ...safeData });
+                }).catch(() => {});
+            } catch (importError) {
+                // Dynamic import not supported in this context, skip analytics
+            }
         }
     }
 

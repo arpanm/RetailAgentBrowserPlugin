@@ -35,44 +35,67 @@ export function matchesFilters(product, filters = {}) {
         return false;
     }
     
-    // Brand filter - must be strict match
+    // Brand filter - lenient matching with aliases
     if (filters.brand) {
         const brandLower = filters.brand.toLowerCase().trim();
         const titleLower = title.toLowerCase();
         
-        // Check if title contains the brand name (exact word match preferred)
-        const brandWords = brandLower.split(/\s+/);
-        const hasBrand = brandWords.some(word => {
-            // Try exact word match first (word boundaries)
-            const exactMatch = new RegExp(`\\b${word}\\b`, 'i').test(titleLower);
-            if (exactMatch) return true;
-            // Fallback to substring match
-            return titleLower.includes(word);
+        // Brand alias mapping for common variations
+        const brandAliases = {
+            'samsung': ['samsung', 'samsung electronics', 'samsung mobile'],
+            'apple': ['apple', 'iphone', 'ipad'],
+            'xiaomi': ['xiaomi', 'mi', 'redmi', 'poco'],
+            'oneplus': ['oneplus', 'one plus', '1+'],
+            'realme': ['realme', 'real me'],
+            'vivo': ['vivo', 'iqoo'],
+            'oppo': ['oppo', 'reno'],
+            'motorola': ['motorola', 'moto'],
+            'nokia': ['nokia', 'hmd global'],
+            'google': ['google', 'pixel'],
+            'asus': ['asus', 'rog'],
+            'sony': ['sony', 'xperia'],
+            'lg': ['lg', 'lg electronics']
+        };
+        
+        // Get all aliases for the required brand
+        let brandVariations = [brandLower];
+        for (const [mainBrand, aliases] of Object.entries(brandAliases)) {
+            if (aliases.some(alias => brandLower.includes(alias) || alias.includes(brandLower))) {
+                brandVariations = [...new Set([...brandVariations, ...aliases])];
+                break;
+            }
+        }
+        
+        // Check if title contains any brand variation (lenient substring match)
+        const hasBrand = brandVariations.some(variation => {
+            // Fuzzy matching - allow for minor typos and variations
+            const words = variation.split(/\s+/);
+            return words.every(word => {
+                // Check exact substring match
+                if (titleLower.includes(word)) return true;
+                
+                // Check fuzzy match (allow 1 character difference for words > 3 chars)
+                if (word.length > 3) {
+                    const regex = new RegExp(word.split('').join('.?'), 'i');
+                    if (regex.test(titleLower)) return true;
+                }
+                
+                return false;
+            });
         });
         
         if (!hasBrand) {
-            logger.info('Product filtered out: brand mismatch', { 
+            logger.debug('Product filtered out: brand mismatch', { 
                 requiredBrand: filters.brand,
+                brandVariations: brandVariations,
                 productTitle: product.title?.substring(0, 80),
                 titleLower: titleLower.substring(0, 80)
             });
             return false;
         }
         
-        // Also check for conflicting brands (if title mentions other brands, reject)
-        const conflictingBrands = ['samsung', 'apple', 'iphone', 'xiaomi', 'redmi', 'oneplus', 'oppo', 'vivo', 'realme', 'nokia', 'lg', 'sony'];
-        const mentionedBrands = conflictingBrands.filter(brand => 
-            brand !== brandLower && titleLower.includes(brand)
-        );
-        
-        if (mentionedBrands.length > 0 && !titleLower.includes(brandLower)) {
-            logger.info('Product filtered out: conflicting brand mentioned', { 
-                requiredBrand: filters.brand,
-                conflictingBrands: mentionedBrands,
-                productTitle: product.title?.substring(0, 80)
-            });
-            return false;
-        }
+        // Note: Removed conflicting brand detection to be more lenient
+        // Products can mention accessories or compatibility with other brands
     }
     
     // Storage filter (e.g., "128gb", "256gb")
@@ -104,20 +127,37 @@ export function matchesFilters(product, filters = {}) {
         }
     }
     
-    // RAM filter (e.g., "6gb", "8gb")
+    // RAM filter (e.g., "6gb", "8gb") - More lenient matching
     if (filters.ram) {
         const ramLower = filters.ram.toLowerCase().replace(/\s+/g, '');
-        // Extract RAM from title (e.g., "6gb ram", "8gb ram")
-        const ramMatch = title.match(/(\d+)\s*(?:gb|gigabytes?)\s*(?:ram|memory)/i);
-        if (!ramMatch) {
-            logger.debug('Product matching RAM check: RAM not in title, accepting anyway', { 
-                ram: filters.ram,
-                title: product.title?.substring(0, 50)
-            });
-            // Don't reject if not in title, might be in description/attributes
-        } else {
-            const productRam = ramMatch[0].toLowerCase().replace(/\s+/g, '');
-            const requiredRam = parseInt(ramLower.replace(/gb/i, ''));
+        const requiredRam = parseInt(ramLower.replace(/gb/i, ''));
+        
+        // Try multiple patterns to find RAM
+        const ramPatterns = [
+            /(\d+)\s*(?:gb|gigabytes?)\s*(?:ram|memory)/i,
+            /(?:ram|memory)[^\d]*(\d+)\s*(?:gb|gigabytes?)/i,
+            /(\d+)\s*(?:gb)\s*(?:ram|memory)/i
+        ];
+        
+        let ramMatch = null;
+        for (const pattern of ramPatterns) {
+            ramMatch = title.match(pattern);
+            if (ramMatch) break;
+        }
+        
+        // Also check if product has RAM attribute from LLM extraction
+        if (!ramMatch && product.ram && typeof product.ram === 'number') {
+            const productRam = product.ram;
+            if (productRam < requiredRam) {
+                logger.debug('Product filtered out: RAM too low (from attributes)', { 
+                    required: filters.ram,
+                    found: productRam,
+                    title: product.title?.substring(0, 50)
+                });
+                return false;
+            }
+            // RAM from attributes meets requirement, continue
+        } else if (ramMatch) {
             const foundRam = parseInt(ramMatch[1]);
             if (foundRam < requiredRam) {
                 logger.debug('Product filtered out: RAM too low', { 
@@ -127,19 +167,43 @@ export function matchesFilters(product, filters = {}) {
                 });
                 return false;
             }
+        } else {
+            // RAM not found in title and not in attributes - be lenient, don't reject
+            logger.debug('Product matching RAM check: RAM not found, accepting anyway (will check attributes later)', { 
+                ram: filters.ram,
+                title: product.title?.substring(0, 50)
+            });
         }
     }
     
-    // Battery filter (e.g., 6000 mAh)
+    // Battery filter (e.g., 6000 mAh) - More lenient matching
     if (filters.battery) {
-        const batteryMatch = title.match(/(\d+)\s*(?:mah|mAh|battery)/i);
-        if (!batteryMatch) {
-            logger.debug('Product matching battery check: battery not in title, accepting anyway', { 
-                battery: filters.battery,
-                title: product.title?.substring(0, 50)
-            });
-            // Don't reject if not in title, might be in description/attributes
-        } else {
+        // Try multiple patterns to find battery
+        const batteryPatterns = [
+            /(\d+)\s*(?:mah|mAh|battery)/i,
+            /(?:battery|mah)[^\d]*(\d+)/i,
+            /(\d+)\s*(?:mah)/i
+        ];
+        
+        let batteryMatch = null;
+        for (const pattern of batteryPatterns) {
+            batteryMatch = title.match(pattern);
+            if (batteryMatch) break;
+        }
+        
+        // Also check if product has battery attribute from LLM extraction
+        if (!batteryMatch && product.battery && typeof product.battery === 'number') {
+            const productBattery = product.battery;
+            if (productBattery < filters.battery) {
+                logger.debug('Product filtered out: battery too low (from attributes)', { 
+                    required: filters.battery,
+                    found: productBattery,
+                    title: product.title?.substring(0, 50)
+                });
+                return false;
+            }
+            // Battery from attributes meets requirement, continue
+        } else if (batteryMatch) {
             const foundBattery = parseInt(batteryMatch[1]);
             if (foundBattery < filters.battery) {
                 logger.debug('Product filtered out: battery too low', { 
@@ -149,6 +213,12 @@ export function matchesFilters(product, filters = {}) {
                 });
                 return false;
             }
+        } else {
+            // Battery not found in title and not in attributes - be lenient, don't reject
+            logger.debug('Product matching battery check: battery not found, accepting anyway (will check attributes later)', { 
+                battery: filters.battery,
+                title: product.title?.substring(0, 50)
+            });
         }
     }
     
@@ -169,12 +239,34 @@ export function matchesFilters(product, filters = {}) {
 }
 
 /**
- * Parse price string to number
+ * Parse price string to number - improved to handle more formats
  */
-function parsePrice(priceStr) {
+export function parsePrice(priceStr) {
     if (!priceStr) return 0;
-    // Remove currency symbols and commas
-    const cleaned = priceStr.toString().replace(/[₹$€£,\s]/g, '');
+    
+    // Handle "from" prices (e.g., "From ₹15,999")
+    let cleaned = priceStr.toString().toLowerCase();
+    if (cleaned.includes('from')) {
+        cleaned = cleaned.replace(/from\s*/i, '');
+    }
+    
+    // Remove currency symbols, commas, and spaces
+    cleaned = cleaned.replace(/[₹$€£¥,\s]/g, '');
+    
+    // Handle "k" or "thousand" notation (e.g., "15k" = 15000)
+    const kMatch = cleaned.match(/(\d+(?:\.\d+)?)\s*k/i);
+    if (kMatch) {
+        return parseFloat(kMatch[1]) * 1000;
+    }
+    
+    // Extract numeric value (handle ranges like "15,999 - 20,000")
+    const rangeMatch = cleaned.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
+    if (rangeMatch) {
+        // Use the lower price from range
+        return parseFloat(rangeMatch[1]);
+    }
+    
+    // Extract single price
     const match = cleaned.match(/(\d+(?:\.\d+)?)/);
     return match ? parseFloat(match[1]) : 0;
 }

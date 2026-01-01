@@ -5,6 +5,7 @@
 import { WalmartPlatform } from './platforms/walmart-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
+import { getSimplifiedPageContent } from './shared/actions.js';
 
 // Register Walmart platform
 const walmartPlatform = new WalmartPlatform();
@@ -16,7 +17,10 @@ chrome.runtime.sendMessage({ type: 'PAGE_LOADED', url: window.location.href }).c
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
     try {
-        if (request.action === 'GET_SEARCH_RESULTS') {
+        if (request.action === 'EXTRACT_PAGE_CONTENT') {
+            const content = await getSimplifiedPageContent('walmart');
+            sendResponse({ content, success: true });
+        } else if (request.action === 'GET_SEARCH_RESULTS') {
             const products = await walmartPlatform.getSearchResults();
             sendResponse({ items: products, success: true });
         } else if (request.action === 'CLICK_BUY_NOW') {

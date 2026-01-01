@@ -1,4 +1,4 @@
-import { generateContent, listModels } from '../lib/gemini.js';
+import { generateContent, listModels, setLogAction } from '../lib/gemini.js';
 import { logger } from '../lib/logger.js';
 import { ErrorHandler, IntentParseError, APIError } from '../lib/error-handler.js';
 import { retryAPICall } from '../lib/retry.js';
@@ -6,6 +6,8 @@ import { platformRegistry, EcommercePlatform } from '../lib/ecommerce-platforms.
 import { configManager } from '../lib/config.js';
 import { loginManager } from '../lib/login-manager.js';
 import { rankResults, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
+import { analyzePage, ANALYSIS_MODES, extractAttributesWithLLM } from '../lib/page-analyzer.js';
+
 
 // Create minimal platform instances for service worker
 // Full implementations are in content scripts
@@ -187,14 +189,13 @@ export async function handleUserQuery(text) {
             const error = new Error('No API Key found. Please configure your Gemini API key in settings.');
             await ErrorHandler.handle(error, { context: 'API_KEY_MISSING' });
             logAction('Error: No API Key found. Please configure in settings.', 'error');
-            return;
-        }
+        return;
+    }
 
         logAction('Analyzing your request...', 'info');
 
         // 2. Parse Intent - try LLM first, fallback to simple parser
         // Set logAction for gemini.js to send model attempts to chat
-        const { setLogAction } = await import('../lib/gemini.js');
         setLogAction(logAction);
         
         let intent;
@@ -370,12 +371,11 @@ export function parseIntentSimple(text) {
 }
 
 export async function parseIntent(apiKey, text) {
-    // Set global logAction for gemini.js
-    const { setLogAction } = await import('../lib/gemini.js');
-    setLogAction(logAction);
+    // Note: setLogAction is now statically imported at the top of the file
+    // It should be called before this function is invoked
     
     try {
-        const systemPrompt = `
+    const systemPrompt = `
     You are a shopping assistant. Extract the following from the user's request.
     Return JSON ONLY. No markdown.
     Fields:
@@ -402,7 +402,7 @@ export async function parseIntent(apiKey, text) {
     User Request: "${text}"
     `;
 
-        const response = await generateContent(apiKey, text, systemPrompt);
+    const response = await generateContent(apiKey, text, systemPrompt);
         
         if (!response || !response.candidates || !response.candidates[0]) {
             throw new IntentParseError('Invalid response from AI service', text);
@@ -589,32 +589,61 @@ function refineSearchQuery(data) {
     // Remove common stop words at the beginning that might confuse search
     refinedQuery = refinedQuery.replace(/^(buy|find|search for|look for|get|i want to buy|show me|i need)\s+/i, '');
 
+    // Transform "greater than" / "less than" / "more than" into search-friendly terms
+    // Handle cases like "greater than 5000", "more than 6gb", "above 4.5 rating"
+    refinedQuery = refinedQuery.replace(/\b(greater than|more than|above|over)\s+(\d+(?:\.\d+)?)(?:\s*(gb|mah|rs|stars?|ratings?))?\b/gi, (match, p1, p2, p3) => {
+        return p3 ? `${p2}${p3.toUpperCase()}+` : `${p2}+`;
+    });
+    refinedQuery = refinedQuery.replace(/\b(less than|under|below)\s+(\d+(?:\.\d+)?)(?:\s*(gb|mah|rs|stars?|ratings?))?\b/gi, (match, p1, p2, p3) => {
+        return p3 ? `under ${p2}${p3.toUpperCase()}` : `under ${p2}`;
+    });
+    
+    // Replace "within" for price
+    refinedQuery = refinedQuery.replace(/\bwithin\s+(\d+)\b/gi, 'under $1');
+    
+    // Normalize units
+    refinedQuery = refinedQuery.replace(/\b(\d+)\s*gb\b/gi, '$1GB');
+    refinedQuery = refinedQuery.replace(/\b(\d+)\s*mah\b/gi, '$1mAh');
+
     // 2. Add high-importance filters to search query if not already present
     // This follows the user request to have filter key values appended
     const filters = data.filters || {};
     const filterValues = [];
     
     if (filters.brand) filterValues.push(filters.brand);
-    if (filters.ram) filterValues.push(filters.ram);
-    if (filters.storage) filterValues.push(filters.storage);
-    if (filters.battery) filterValues.push(`${filters.battery}mah`);
+    if (filters.ram) filterValues.push(`${filters.ram.toString().toUpperCase().replace(/\s/g, '')}`);
+    if (filters.storage) filterValues.push(`${filters.storage.toString().toUpperCase().replace(/\s/g, '')}`);
+    if (filters.battery) filterValues.push(`${filters.battery}mAh`);
     if (filters.price_max) filterValues.push(`under ${filters.price_max}`);
     
     // Add injected keywords from LLM
     if (data.injectedKeywords && Array.isArray(data.injectedKeywords)) {
         data.injectedKeywords.forEach(keyword => {
-            if (keyword && !filterValues.some(v => v.toLowerCase() === keyword.toLowerCase())) {
-                filterValues.push(keyword);
+            if (keyword) {
+                const kwLower = keyword.toLowerCase();
+                if (!filterValues.some(v => v.toLowerCase() === kwLower)) {
+                    filterValues.push(keyword);
+                }
             }
         });
     }
 
     // Append filter values ONLY if they aren't already mentioned in the query
+    // Use a smarter check for numbers (e.g., "20000" matches "20,000" or "20000rs")
     const lowerQuery = refinedQuery.toLowerCase();
     filterValues.forEach(val => {
         const valStr = val.toString().toLowerCase();
-        // Check if value is already in query (handle "6gb" matching "6 gb ram")
-        const valClean = valStr.replace(/\s+/g, '');
+        
+        // If it's a number (like price or battery), check for the number itself
+        if (/^\d+$/.test(valStr)) {
+            if (new RegExp(`\\b${valStr}\\b`).test(lowerQuery)) return;
+        }
+
+        // Check if value is already in query (handle "6GB" matching "6 gb ram")
+        // Remove units for comparison
+        const valClean = valStr.replace(/\s+/g, '').replace(/gb|mah|rs|under|above|over/g, '');
+        if (valClean.length === 0) return; 
+
         const queryClean = lowerQuery.replace(/\s+/g, '');
         
         if (!queryClean.includes(valClean)) {
@@ -622,7 +651,151 @@ function refineSearchQuery(data) {
         }
     });
     
+    // Add platform name if missing
+    if (data.platform && !lowerQuery.includes(data.platform.name)) {
+        refinedQuery = `${data.platform.name} ${refinedQuery}`;
+    }
+    
+    // Final check: Remove redundant units that might have been added
+    refinedQuery = refinedQuery.replace(/\b(\d+)\s*(GB|MAH)\s+(\d+)\s*(?:GB|MAH)\b/gi, (match, p1, p2) => `${p1}${p2}`);
+    
+    // Final deduplication of words (case-insensitive)
+    const words = refinedQuery.split(/\s+/);
+    const uniqueWords = [];
+    const seenWords = new Set();
+    for (const word of words) {
+        const lower = word.toLowerCase();
+        if (!seenWords.has(lower)) {
+            seenWords.add(lower);
+            uniqueWords.push(word);
+        }
+    }
+    refinedQuery = uniqueWords.join(' ');
+
     return refinedQuery.trim();
+}
+
+/**
+ * Perform LLM-based page analysis and execute recommended action
+ */
+async function performLLMPageAnalysis(tabId, mode = ANALYSIS_MODES.GENERAL) {
+    try {
+        logAction('Analyzing page content with AI...', 'info');
+        
+        // 1. Get simplified page content
+        const response = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Timeout extracting page content')), 15000);
+            chrome.tabs.sendMessage(tabId, { action: 'EXTRACT_PAGE_CONTENT' }, (resp) => {
+                clearTimeout(timeout);
+                if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                else resolve(resp);
+            });
+        });
+
+        if (!response || !response.success) {
+            throw new Error(response?.error || 'Failed to extract page content');
+        }
+
+        // 2. Call LLM to analyze
+        const apiKey = await configManager.get('apiKey');
+        const context = {
+            intent: currentState.data.originalQuery || currentState.data.product,
+            status: currentState.status,
+            platform: currentState.platform?.name || 'unknown'
+        };
+
+        const recommendation = await analyzePage(apiKey, response.content, context, mode);
+        
+        // Handle different action types based on mode
+        if (mode === ANALYSIS_MODES.ANALYZE_SEARCH_RESULTS && recommendation.action === 'extract_products') {
+            logAction(`AI extracted ${recommendation.products?.length || 0} products`, 'info');
+            // Process extracted products
+            if (recommendation.products && recommendation.products.length > 0) {
+                // Validate and use extracted products
+                const validProducts = recommendation.products.filter(p => {
+                    const hasTitle = p.title && p.title.trim().length > 0;
+                    const hasLink = p.link && p.link.trim().length > 0;
+                    return hasTitle && hasLink;
+                });
+                
+                if (validProducts.length > 0) {
+                    logger.info('Using LLM-extracted products', { 
+                        count: validProducts.length,
+                        sample: validProducts.slice(0, 2).map(p => ({
+                            title: p.title?.substring(0, 50),
+                            price: p.priceNumeric || p.price,
+                            hasLink: !!p.link
+                        }))
+                    });
+                    // Return products for further processing in calling code
+                    return { success: true, products: validProducts, source: 'llm' };
+                } else {
+                    logger.warn('LLM extracted products but none were valid');
+                    return { success: false, error: 'No valid products extracted by LLM' };
+                }
+            } else {
+                logger.warn('LLM did not extract any products');
+                return { success: false, error: 'LLM returned no products' };
+            }
+        }
+        
+        if (recommendation.reason) {
+            logAction(`AI Recommendation: ${recommendation.reason}`, 'info');
+        }
+
+        // 3. Execute recommendation
+        if (recommendation.action === 'select_product') {
+            logAction(`AI selected product: ${recommendation.title}`, 'info');
+            currentState.status = 'PRODUCT_PAGE';
+            await chrome.tabs.update(tabId, { url: recommendation.url });
+        } 
+        else if (recommendation.action === 'click') {
+            logAction(`AI clicking: ${recommendation.reason}`, 'info');
+            await chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                func: (selector) => {
+                    const el = document.querySelector(selector);
+                    if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        el.click();
+                        return true;
+                    }
+                    return false;
+                },
+                args: [recommendation.selector]
+            });
+        }
+        else if (recommendation.action === 'input') {
+            logAction(`AI entering text: ${recommendation.reason}`, 'info');
+            await chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                func: (selector, value) => {
+                    const el = document.querySelector(selector);
+                    if (el) {
+                        el.value = value;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        return true;
+                    }
+                    return false;
+                },
+                args: [recommendation.selector, recommendation.value]
+            });
+        }
+        else if (recommendation.action === 'completed') {
+            logAction('Task completed successfully!', 'info');
+            currentState.status = 'COMPLETED';
+        }
+        else if (recommendation.action === 'error') {
+            throw new Error(recommendation.message);
+        }
+
+        return true;
+    } catch (error) {
+        logger.error('LLM Page Analysis execution failed', error);
+        logAction(`AI analysis failed: ${error.message}`, 'error');
+        return false;
+    }
 }
 
 export async function executeNextStep(tabId) {
@@ -654,7 +827,7 @@ export async function executeNextStep(tabId) {
                         return new Promise((resolve, reject) => {
                             const timeout = setTimeout(() => {
                                 reject(new Error('Timeout waiting for search response'));
-                            }, 10000);
+                            }, 45000); // Increased from 10s to 45s for search + filter application
                             
                             chrome.tabs.sendMessage(tabId, { 
                                 action: 'SEARCH', 
@@ -754,7 +927,7 @@ export async function executeNextStep(tabId) {
                     // Set a timeout to avoid hanging forever
                     const timeout = setTimeout(() => {
                         reject(new Error('Timeout waiting for content script response'));
-                    }, 10000); // 10 second timeout
+                    }, 20000); // Increased from 10s to 20s
                     
                     chrome.tabs.sendMessage(tabId, { 
                         action: 'GET_SEARCH_RESULTS',
@@ -839,7 +1012,11 @@ export async function executeNextStep(tabId) {
                     items = response.items;
                 }
                 
-                logger.info('Extracted search results', { count: items.length });
+                logger.info('Extracted search results from content script', { 
+                    count: items.length,
+                    hasResponse: !!response,
+                    responseKeys: response ? Object.keys(response) : []
+                });
                 logAction(`Found ${items.length} items on page.`, 'info');
             } catch (extractError) {
                 logger.error('Error extracting items from response', extractError);
@@ -847,7 +1024,100 @@ export async function executeNextStep(tabId) {
                 return;
             }
 
-            if (items.length > 0) {
+            // Validate products before processing with scoring system
+            const validatedItems = [];
+            const invalidItems = [];
+            
+            for (const item of items) {
+                const hasTitle = item && item.title && typeof item.title === 'string' && item.title.trim().length > 0;
+                const hasLink = item && item.link && typeof item.link === 'string' && item.link.trim().length > 0;
+                
+                // Required fields: title and link
+                if (hasTitle && hasLink) {
+                    // Relaxed URL validation - accept relative URLs and various formats
+                        const url = item.link.trim();
+                    const isValidUrl = url.startsWith('http://') || 
+                                      url.startsWith('https://') || 
+                                      url.startsWith('/') ||
+                                      url.includes('/dp/') ||  // Amazon product
+                                      url.includes('/p/') ||    // Flipkart product
+                                      url.includes('/gp/') ||   // Amazon general product
+                                      url.includes('product');  // Generic product URL
+                    
+                    if (isValidUrl) {
+                        // Calculate product quality score (for ranking/prioritization)
+                        let qualityScore = 0;
+                        
+                        // Title quality (longer, more descriptive titles score higher)
+                        if (item.title.length > 30) qualityScore += 2;
+                        else if (item.title.length > 15) qualityScore += 1;
+                        
+                        // Has price
+                        if (item.price && item.price.trim().length > 0) qualityScore += 3;
+                        
+                        // Has rating
+                        if (item.rating && item.rating.trim().length > 0) qualityScore += 2;
+                        
+                        // Has image
+                        if (item.image && item.image.trim().length > 0) qualityScore += 1;
+                        
+                        // Has reviews count
+                        if (item.reviews && item.reviews.trim().length > 0) qualityScore += 1;
+                        
+                        // Link quality (absolute URLs preferred)
+                        if (url.startsWith('http')) qualityScore += 2;
+                        else if (url.startsWith('/')) qualityScore += 1;
+                        
+                        // Attach score to item
+                        item._qualityScore = qualityScore;
+                        
+                            validatedItems.push(item);
+                        } else {
+                        invalidItems.push({ 
+                            reason: 'Invalid URL format', 
+                            item: { 
+                                title: item.title?.substring(0, 50), 
+                                link: item.link?.substring(0, 80),
+                                score: 0
+                            } 
+                        });
+                        logger.debug('Product invalid: bad URL format', {
+                            title: item.title?.substring(0, 50),
+                            link: url?.substring(0, 80)
+                        });
+                    }
+                } else {
+                    // Missing required fields
+                    const reason = !hasTitle ? 'Missing title' : 'Missing link';
+                    invalidItems.push({ 
+                        reason: reason, 
+                        item: { 
+                            hasTitle, 
+                            hasLink,
+                            title: item?.title?.substring(0, 50),
+                            link: item?.link?.substring(0, 80),
+                            score: 0
+                        } 
+                    });
+                    logger.debug('Product invalid: missing required field', {
+                        reason,
+                        title: item?.title?.substring(0, 50),
+                        hasLink
+                    });
+                }
+            }
+            
+            // Sort validated items by quality score (higher scores first)
+            validatedItems.sort((a, b) => (b._qualityScore || 0) - (a._qualityScore || 0));
+            
+            logger.info('Product validation completed', {
+                originalCount: items.length,
+                validatedCount: validatedItems.length,
+                invalidCount: invalidItems.length,
+                invalidSamples: invalidItems.slice(0, 3)
+            });
+
+            if (validatedItems.length > 0) {
                 try {
                     const filters = currentState.data.filters || {};
                     const intent = {
@@ -856,20 +1126,33 @@ export async function executeNextStep(tabId) {
                     };
 
                     logger.info('Starting product matching and ranking', { 
-                        totalProducts: items.length,
+                        totalProducts: validatedItems.length,
                         filters: Object.keys(filters),
+                        filterValues: filters,
                         intent
                     });
                     
                     // 1. Programmatic Ranking based on intent (cheapest, etc.)
-                    const rankedItems = rankResults(items, intent);
+                    const rankedItems = rankResults(validatedItems, intent);
+                    logger.info('Products ranked', { rankedCount: rankedItems.length });
                     
                     // 2. Second-level matching: Try each product until we find one that matches filters
                     let bestItem = null;
                     let itemIndex = 0;
+                    const checkedItems = [];
                     
-                    while (itemIndex < rankedItems.length && !bestItem) {
-                        const item = rankedItems[itemIndex];
+                    // Filter out duplicate link entries that some platforms produce
+                    const uniqueItems = [];
+                    const seenLinks = new Set();
+                    for (const item of rankedItems) {
+                        if (item.link && !seenLinks.has(item.link)) {
+                            seenLinks.add(item.link);
+                            uniqueItems.push(item);
+                        }
+                    }
+
+                    while (itemIndex < uniqueItems.length && !bestItem) {
+                        const item = uniqueItems[itemIndex];
                         
                         // Skip if no link
                         if (!item.link || item.link === '') {
@@ -879,8 +1162,15 @@ export async function executeNextStep(tabId) {
                         
                         // Check if product matches filters using robust product-matcher
                         const matches = matchesFilters(item, filters);
+                        const unavailable = isUnavailable(item);
                         
-                        if (matches && !isUnavailable(item)) {
+                        checkedItems.push({
+                            title: item.title?.substring(0, 40),
+                            matches,
+                            unavailable
+                        });
+                        
+                        if (matches && !unavailable) {
                             bestItem = item;
                             logger.info('Found matching product', {
                                 title: item.title?.substring(0, 60),
@@ -890,24 +1180,150 @@ export async function executeNextStep(tabId) {
                             });
                             logAction(`Found matching product: ${item.title?.substring(0, 50)}`, 'info');
                             break;
-                        } else {
-                            logger.info('Product does not match filters or is unavailable, trying next', {
-                                title: item.title?.substring(0, 60),
-                                index: itemIndex,
-                                reason: isUnavailable(item) ? 'unavailable' : 'filter_mismatch'
-                            });
                         }
                         
                         itemIndex++;
                     }
                     
+                    // 3. Relaxed Matching Fallback: If no strict match, try with just Brand and Category
+                    if (!bestItem && uniqueItems.length > 0 && Object.keys(filters).length > 1) {
+                        logger.info('No strict match found, attempting relaxed matching');
+                        logAction('No perfect match found. Looking for closest match...', 'info');
+                        
+                        const relaxedFilters = {};
+                        if (filters.brand) relaxedFilters.brand = filters.brand;
+                        if (filters.category) relaxedFilters.category = filters.category;
+                        
+                        for (const item of uniqueItems) {
+                            if (item.link && matchesFilters(item, relaxedFilters) && !isUnavailable(item)) {
+                                bestItem = item;
+                                logger.info('Found relaxed match', {
+                                    title: item.title?.substring(0, 60),
+                                    relaxedFilters: Object.keys(relaxedFilters)
+                                });
+                                logAction(`Found likely match (relaxed criteria): ${item.title?.substring(0, 50)}`, 'info');
+                                break;
+                            }
+                        }
+                    }
+                    
                     if (!bestItem) {
-                        logger.warn('No products matched filters after second-level check', {
-                            totalProducts: items.length,
+                        logger.warn('No products matched filters after strict and relaxed check', {
+                            totalProducts: validatedItems.length,
+                            originalCount: items.length,
+                            validatedCount: validatedItems.length,
                             filters: Object.keys(filters),
-                            checkedProducts: itemIndex
+                            filterValues: filters,
+                            checkedItemsSamples: checkedItems.slice(0, 5),
+                            rankedItemsCount: rankedItems.length,
+                            uniqueItemsCount: uniqueItems.length
                         });
-                        logAction('No suitable products found matching your criteria after checking all products.', 'warn');
+                        
+                        // FALLBACK: Use LLM to analyze the page and extract products
+                        logAction('Rule-based matching failed. Asking AI to analyze the page...', 'info');
+                        const aiResult = await performLLMPageAnalysis(tabId, ANALYSIS_MODES.ANALYZE_SEARCH_RESULTS);
+                        
+                        if (aiResult && aiResult.success && aiResult.products && aiResult.products.length > 0) {
+                            logger.info('LLM extracted products successfully', { count: aiResult.products.length });
+                            logAction(`AI found ${aiResult.products.length} products. Selecting best match...`, 'info');
+                            
+                            // Process LLM-extracted products
+                            const llmProducts = aiResult.products;
+                            
+                            // Normalize and validate LLM-extracted product links
+                            for (const product of llmProducts) {
+                                // Ensure absolute URLs
+                                if (product.link && !product.link.startsWith('http')) {
+                                    const origin = currentState.platform?.name === 'flipkart' 
+                                        ? 'https://www.flipkart.com' 
+                                        : 'https://www.amazon.in';
+                                    try {
+                                        product.link = new URL(product.link, origin).href;
+                                    } catch (e) {
+                                        logger.warn('Failed to normalize LLM product link', { link: product.link });
+                                    }
+                                }
+                            }
+                            
+                            // Filter LLM products by user filters
+                            const llmFilteredProducts = llmProducts.filter(product => {
+                                const matches = matchesFilters(product, filters);
+                                const unavailable = isUnavailable(product);
+                                return matches && !unavailable;
+                            });
+                            
+                            logger.info('LLM products after filtering', { 
+                                total: llmProducts.length,
+                                filtered: llmFilteredProducts.length,
+                                filters: Object.keys(filters)
+                            });
+                            
+                            // Select best product from LLM results
+                            let selectedProduct = null;
+                            if (llmFilteredProducts.length > 0) {
+                                // Use first filtered product (LLM should have ranked them)
+                                selectedProduct = llmFilteredProducts[0];
+                            } else if (llmProducts.length > 0) {
+                                // Fallback: use first LLM product even if doesn't match filters
+                                selectedProduct = llmProducts[0];
+                                logger.info('Using LLM product without strict filter match');
+                            }
+                            
+                            if (selectedProduct && selectedProduct.link) {
+                                const productTitle = String(selectedProduct.title || '');
+                                const productPrice = String(selectedProduct.price || '');
+                                const productLink = String(selectedProduct.link || '');
+                                
+                                logAction(`AI selected: ${productTitle}`, 'info');
+                                if (productPrice) logAction(`Price: ${productPrice}`, 'info');
+                                logAction(`Navigating to product page...`, 'info');
+                                
+                                currentState.status = 'PRODUCT_PAGE';
+                                
+                                // Navigate using the same retry logic
+                                // (Navigation logic continues below...)
+                                try {
+                                    await chrome.tabs.update(tabId, { url: productLink });
+                                    logger.info('LLM product navigation initiated', { url: productLink });
+                                } catch (navError) {
+                                    logger.error('Failed to navigate to LLM product', navError);
+                                    logAction('Failed to open product page', 'error');
+                                }
+                                return;
+                            }
+                        }
+                        
+                        // Provide detailed summary of why no products were found
+                        let errorSummary = 'No suitable products found. ';
+                        
+                        if (items.length === 0) {
+                            errorSummary += 'No items extracted from page. ';
+                        } else if (validatedItems.length === 0) {
+                            errorSummary += `${items.length} items found but all were invalid. `;
+                        } else if (matched.length === 0) {
+                            errorSummary += `${validatedItems.length} valid items found but none matched your filters. `;
+                            
+                            // List active filters
+                            const activeFilters = Object.entries(filters)
+                                .filter(([k, v]) => v)
+                                .map(([k, v]) => `${k}: ${v}`)
+                                .join(', ');
+                            
+                            if (activeFilters) {
+                                errorSummary += `Active filters: ${activeFilters}. `;
+                            }
+                        }
+                        
+                        errorSummary += 'Try adjusting your search criteria or filters.';
+                        
+                        logger.warn('Product selection failed - detailed summary', {
+                            totalItems: items.length,
+                            validItems: validatedItems.length,
+                            matchedItems: matched.length,
+                            filters: filters
+                        });
+                        
+                        logAction(errorSummary, 'warn');
                         return;
                     }
                     
@@ -941,15 +1357,127 @@ export async function executeNextStep(tabId) {
 
                 currentState.status = 'PRODUCT_PAGE';
 
-                    // Navigate to product page
+                    // Store selected product info for potential retry
+                    currentState.selectedProduct = {
+                        title: bestItem.title,
+                        price: bestItem.price,
+                        link: productLink
+                    };
+
+                    // Navigate to product page with retry logic
                     logger.info('Navigating to product', { url: productLink, tabId });
-                    try {
-                        await chrome.tabs.update(tabId, { url: productLink });
-                        logger.info('Navigation initiated successfully', { url: productLink });
-                        logAction(`Opening product page...`, 'info');
+                    
+                    let navigationSucceeded = false;
+                    const maxRetries = 3;
+                    
+                    for (let attempt = 1; attempt <= maxRetries && !navigationSucceeded; attempt++) {
+                        try {
+                            // Verify tab still exists and is valid
+                            let tab;
+                            try {
+                                tab = await chrome.tabs.get(tabId);
+                                if (!tab || !tab.id) {
+                                    throw new Error('Tab not found or invalid');
+                                }
+                            } catch (tabError) {
+                                logger.error('Tab validation failed', { attempt, tabId, error: tabError.message });
+                                throw new Error(`Tab ${tabId} no longer exists`);
+                            }
+                            
+                            // Attempt navigation using tabs.update
+                            logger.info('Navigation attempt via tabs.update', { attempt, url: productLink, tabId });
+                            await chrome.tabs.update(tabId, { url: productLink });
+                            
+                            // Wait a moment to verify navigation initiated
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            
+                            // Verify navigation succeeded by checking tab URL
+                            try {
+                                const updatedTab = await chrome.tabs.get(tabId);
+                                if (updatedTab && (updatedTab.url === productLink || updatedTab.pendingUrl === productLink)) {
+                                    navigationSucceeded = true;
+                                    logger.info('Navigation verified successfully', { attempt, url: productLink });
+                            logAction(`Opening product page...`, 'info');
+                        } else {
+                                    logger.warn('Navigation not verified, URL mismatch', { 
+                                        attempt,
+                                        expected: productLink,
+                                        actual: updatedTab?.url,
+                                        pending: updatedTab?.pendingUrl
+                                    });
+                                    // Don't throw here, try fallback on last attempt
+                                    if (attempt === maxRetries) {
+                                        throw new Error('Navigation URL mismatch');
+                                    }
+                                }
+                            } catch (verifyError) {
+                                logger.warn('Could not verify navigation', { attempt, error: verifyError.message });
+                                // Assume success if we can't verify (tab might be loading)
+                                navigationSucceeded = true;
+                            }
+                            
                     } catch (navError) {
-                        logger.error('Navigation failed', null, { errorMessage: String(navError.message || 'Unknown error') });
-                        logAction(`Failed to navigate: ${navError.message}`, 'error');
+                            const errorMsg = String(navError.message || 'Unknown error');
+                            logger.error('Navigation attempt failed', { 
+                                attempt,
+                                maxRetries,
+                                errorMessage: errorMsg,
+                                url: productLink,
+                                tabId
+                            });
+                            
+                            // On last attempt, try fallback methods
+                            if (attempt === maxRetries) {
+                                logger.info('Trying content script fallback navigation');
+                                logAction('Trying alternative navigation method...', 'info');
+                                
+                                try {
+                                    // Fallback 1: Use content script to navigate
+                            await chrome.scripting.executeScript({
+                                target: { tabId: tabId },
+                                        func: (link) => { 
+                                            window.location.href = link;
+                                            return true;
+                                        },
+                                args: [productLink]
+                            });
+                                    logger.info('Content script navigation initiated');
+                                    navigationSucceeded = true;
+                                    
+                                    // Wait for navigation to start
+                                    await new Promise(resolve => setTimeout(resolve, 1500));
+                                    
+                                } catch (fallbackError1) {
+                                    logger.error('Content script navigation failed', fallbackError1);
+                                    
+                                    try {
+                                        // Fallback 2: Try direct tab navigation with different parameters
+                                        await chrome.tabs.update(tabId, { 
+                                            url: productLink,
+                                            active: true
+                                        });
+                                        logger.info('Fallback direct navigation attempted');
+                                        navigationSucceeded = true;
+                                        await new Promise(resolve => setTimeout(resolve, 1000));
+                                        
+                                    } catch (fallbackError2) {
+                                        logger.error('All navigation methods failed', { 
+                                            originalError: errorMsg,
+                                            fallbackError1: fallbackError1.message,
+                                            fallbackError2: fallbackError2.message
+                                        });
+                                        logAction(`Failed to navigate after ${maxRetries} attempts`, 'error');
+                                    }
+                                }
+                            } else {
+                                // Wait before retry
+                                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                            }
+                        }
+                    }
+                    
+                    if (!navigationSucceeded) {
+                        logAction('Navigation failed. Please try manually opening the product.', 'error');
                     }
                 } catch (itemError) {
                     const errorMsg = itemError?.message || String(itemError) || 'Unknown error';
@@ -961,8 +1489,20 @@ export async function executeNextStep(tabId) {
                     logAction(`Error processing product item: ${errorMsg}`, 'error');
                 }
             } else {
-                logAction('No suitable products found.', 'warn');
-                logger.warn('No products in response', { itemCount: items ? items.length : 0 });
+                logger.warn('No validated products found', {
+                    originalCount: items.length,
+                    validatedCount: validatedItems.length,
+                    invalidCount: invalidItems.length
+                });
+                logAction('No products found by rules. Asking AI to analyze page...', 'info');
+                const aiSucceeded = await performLLMPageAnalysis(tabId);
+                if (!aiSucceeded) {
+                    logAction('No suitable products found.', 'warn');
+                    logger.warn('No products in response and AI analysis failed', { 
+                        itemCount: items ? items.length : 0,
+                        validatedCount: validatedItems.length
+                    });
+                }
             }
         } catch (e) {
             // Safely extract error message without trying to serialize the error object
@@ -976,7 +1516,78 @@ export async function executeNextStep(tabId) {
         }
     }
     else if (currentState.status === 'PRODUCT_PAGE') {
-        // Check for login screen first
+        // Verify we're actually on a product page, not still on search results
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            const currentUrl = tab?.url || '';
+            
+            logger.info('Verifying product page navigation', { currentUrl, tabId });
+            
+            // Check if URL indicates we're still on search results
+            const isSearchResultsUrl = currentUrl.includes('/s?') || 
+                                       currentUrl.includes('/search?') ||
+                                       currentUrl.includes('/search/') ||
+                                       (currentUrl.includes('amazon.in') && !currentUrl.match(/\/(dp|gp\/product)\//)) ||
+                                       (currentUrl.includes('flipkart.com') && !currentUrl.includes('/p/'));
+            
+            if (isSearchResultsUrl) {
+                logger.warn('Still on search results page, navigation may have failed', { currentUrl });
+                logAction('Navigation verification: still on search results. Retrying...', 'warn');
+                
+                // Retry navigation if we have the product link stored
+                if (currentState.selectedProduct?.link) {
+                    const productLink = currentState.selectedProduct.link;
+                    logger.info('Retrying navigation to product page', { productLink });
+                    
+                    try {
+                        // Try different navigation method
+                        await chrome.scripting.executeScript({
+                            target: { tabId: tabId },
+                            func: (link) => { 
+                                window.location.href = link;
+                            },
+                            args: [productLink]
+                        });
+                        
+                        // Wait for navigation to complete
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        
+                        // Check again
+                        const retryTab = await chrome.tabs.get(tabId);
+                        const retryUrl = retryTab?.url || '';
+                        
+                        if (retryUrl.includes('/s?') || retryUrl.includes('/search')) {
+                            logger.error('Navigation retry failed, still on search results', { retryUrl });
+                            logAction('Failed to navigate to product page after retry.', 'error');
+                            return;
+                        }
+                        
+                        logger.info('Navigation retry succeeded', { retryUrl });
+                        
+                    } catch (retryError) {
+                        logger.error('Navigation retry failed', retryError);
+                        logAction('Failed to retry navigation', 'error');
+                        return;
+                    }
+                } else {
+                    logger.error('No product link stored for retry');
+                    logAction('Cannot retry navigation: no product link available', 'error');
+                    currentState.status = 'SELECTING';
+                    return;
+                }
+            } else {
+                logger.info('Product page navigation verified', { currentUrl });
+            }
+            
+            // Wait a moment for page to stabilize after verification
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+        } catch (verifyError) {
+            logger.warn('Could not verify product page navigation', { error: verifyError.message });
+            // Continue anyway, might be a transient issue
+        }
+        
+        // Check for login screen
         try {
             const platform = currentState.platform;
             if (platform) {
@@ -1049,11 +1660,15 @@ export async function executeNextStep(tabId) {
             const response = await clickBuyNowPromise();
             logger.info('Buy Now response', { response });
             
-                if (response && response.success) {
-                    currentState.status = 'CHECKOUT_FLOW';
+            if (response && response.success) {
+                currentState.status = 'CHECKOUT_FLOW';
                 logAction('Clicked Buy Now. Proceeding to Checkout...', 'info');
             } else {
-                logAction('Could not click "Buy Now". Trying Add to Cart instead...', 'warn');
+                logAction('Could not click "Buy Now" with rules. Asking AI to analyze page...', 'info');
+                const aiSucceeded = await performLLMPageAnalysis(tabId);
+                if (aiSucceeded) return;
+
+                logAction('AI could not find action. Trying Add to Cart as last resort...', 'warn');
                 // Try Add to Cart as fallback
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 const cartResponse = await chrome.tabs.sendMessage(tabId, { action: 'ADD_TO_CART' });
@@ -1062,17 +1677,20 @@ export async function executeNextStep(tabId) {
                 } else {
                     logAction('Could not add to cart. Product might be out of stock or require login.', 'warn');
                 }
-                }
+            }
             } catch (e) {
             logger.error('Error clicking Buy Now', e, { 
                 errorMessage: e.message,
                 errorStack: e.stack 
             });
-            logAction(`Error clicking Buy Now: ${e.message}`, 'error');
+            logAction(`Error clicking Buy Now: ${e.message}. Asking AI to analyze page...`, 'error');
             
-            // Try Add to Cart as fallback even on error
+            const aiSucceeded = await performLLMPageAnalysis(tabId);
+            if (aiSucceeded) return;
+
+            // Try Add to Cart as last fallback
             try {
-                logAction('Trying Add to Cart as fallback...', 'info');
+                logAction('Trying Add to Cart as last resort...', 'info');
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 const cartResponse = await chrome.tabs.sendMessage(tabId, { action: 'ADD_TO_CART' });
                 if (cartResponse && cartResponse.success) {

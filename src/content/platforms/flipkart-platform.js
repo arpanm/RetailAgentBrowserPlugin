@@ -19,23 +19,25 @@ export class FlipkartPlatform extends EcommercePlatform {
                 },
                 results: {
                     container: [
+                        'div[data-id]',
                         '._1AtVbE',
                         '._2kHMtA',
-                        '[data-id]',
-                        'div[style*="flex"]:has(a[href*="/p/"])',
-                        'div:has(._4rR01T)',
-                        'div:has(a.IRpwTa)'
+                        'div.sl-so-container',
+                        'div._1xHGtK',
+                        'div._4ddp_z'
                     ],
                     title: [
                         '._4rR01T',
                         'a.IRpwTa',
-                        '._2UzuFa',
-                        'a[href*="/p/"]',
-                        '._1fQZEK'
+                        'div.ygS67m',
+                        'a.s1Q9rs',
+                        '._2WkVRV',
+                        'a[title]'
                     ],
                     link: [
                         'a.IRpwTa',
                         'a._1fQZEK',
+                        'a.s1Q9rs',
                         'a[href*="/p/"]',
                         'a._2UzuFa'
                     ],
@@ -125,8 +127,9 @@ export class FlipkartPlatform extends EcommercePlatform {
 
                 const targetLabels = [];
                 if (key === 'brand') targetLabels.push('brand', 'brands', 'brand name');
-                if (key === 'ram') targetLabels.push('ram', 'memory', 'system memory');
+                if (key === 'ram') targetLabels.push('ram', 'memory', 'system memory', 'internal memory');
                 if (key === 'storage') targetLabels.push('storage', 'internal storage', 'ssd capacity');
+                if (key === 'battery') targetLabels.push('battery', 'battery capacity', 'battery power', 'mah', 'mAh');
                 if (key === 'rating') targetLabels.push('customer ratings', 'rating', 'avg. customer review');
 
                 let filterGroup = null;
@@ -140,32 +143,104 @@ export class FlipkartPlatform extends EcommercePlatform {
                 if (filterGroup) {
                     const valueStr = value.toString().toLowerCase();
                     const cleanValue = valueStr.replace(/(\d+)([a-z]+)/, '$1 $2');
+                    const numericValue = parseInt(valueStr.replace(/[^\d]/g, ''));
                     
                     const target = filterGroup.elements.find(el => {
                         const itemText = el.text.toLowerCase();
                         const itemTextClean = itemText.replace(/\s+/g, '');
                         const valueClean = valueStr.replace(/\s+/g, '');
                         
+                        // Enhanced matching for RAM
+                        if (key === 'ram' && el.isRAM && el.ramValue) {
+                            const requiredRAM = parseInt(valueStr.replace(/gb/i, ''));
+                            return el.ramValue >= requiredRAM;
+                        }
+                        
+                        // Enhanced matching for battery
+                        if (key === 'battery' && el.isBattery && el.batteryValue) {
+                            return el.batteryValue >= numericValue;
+                        }
+                        
+                        // Enhanced matching for storage
+                        if (key === 'storage' && el.isStorage && el.storageValue) {
+                            const requiredStorage = parseInt(valueStr.replace(/gb|tb/i, ''));
+                            return el.storageValue >= requiredStorage;
+                        }
+                        
+                        // Standard text matching
                         return itemText.includes(valueStr) || 
                                itemText.includes(cleanValue) || 
-                               itemTextClean.includes(valueClean);
+                               itemTextClean.includes(valueClean) ||
+                               (key === 'battery' && numericValue && itemText.includes(numericValue.toString()));
                     });
 
                     if (target) {
                         logger.info(`Flipkart: Applying discovered filter ${key} -> ${target.text}`);
                         const prevUrl = globalThis.location.href;
+                        const prevProductCount = document.querySelectorAll('div[data-id], ._1AtVbE').length;
+                        
+                        // Try clicking the filter
                         await safeClick(target.element);
                         
-                        // Wait and validate
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                        if (globalThis.location.href === prevUrl) {
-                            logger.warn(`Flipkart: Filter ${key} didn't trigger navigation, trying with dispatchEvent`);
-                            await safeClick(target.element, { useDispatchEvent: true });
-                            await new Promise(resolve => setTimeout(resolve, 3000));
+                        // Wait for page update - check for URL change or DOM update
+                        let urlChanged = false;
+                        let domUpdated = false;
+                        
+                        for (let i = 0; i < 10; i++) {
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                            
+                            if (globalThis.location.href !== prevUrl) {
+                                urlChanged = true;
+                                logger.info(`Flipkart: Filter ${key} triggered URL change`);
+                                break;
+                            }
+                            
+                            const currentProductCount = document.querySelectorAll('div[data-id], ._1AtVbE').length;
+                            if (currentProductCount !== prevProductCount) {
+                                domUpdated = true;
+                                logger.info(`Flipkart: Filter ${key} triggered DOM update (products: ${prevProductCount} -> ${currentProductCount})`);
+                                break;
+                            }
+                            
+                            // Check for loading indicators
+                            const loadingIndicator = document.querySelector('[class*="loading"], [aria-busy="true"]');
+                            if (!loadingIndicator && i > 2) {
+                                // No loading indicator and waited a bit, might be done
+                                break;
+                            }
                         }
+                        
+                        // If no change detected, try alternative methods
+                        if (!urlChanged && !domUpdated) {
+                            logger.warn(`Flipkart: Filter ${key} didn't trigger change, trying alternative methods`);
+                            
+                            // Try with dispatchEvent
+                            await safeClick(target.element, { useDispatchEvent: true });
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            
+                            // Check if parent element needs clicking
+                            const parent = target.element.closest('a, button, [role="button"]');
+                            if (parent && parent !== target.element) {
+                                await safeClick(parent);
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                            }
+                        }
+
+                        // Wait a bit more for any final updates
+                        await new Promise(resolve => setTimeout(resolve, 1000));
 
                         // Rediscover as DOM changes
                         availableFilters = await discoverAvailableFilters();
+                    } else {
+                        logger.warn(`Flipkart: No matching element found for filter ${key} -> ${value}`, {
+                            availableOptions: filterGroup.elements.slice(0, 5).map(e => ({
+                                text: e.text,
+                                isRAM: e.isRAM,
+                                isBattery: e.isBattery,
+                                ramValue: e.ramValue,
+                                batteryValue: e.batteryValue
+                            }))
+                        });
                     }
                 }
             }
@@ -189,80 +264,48 @@ export class FlipkartPlatform extends EcommercePlatform {
             
             let products = [];
             
-            const extract = () => {
-                let results = [];
-                for (const containerSelector of containerSelectors) {
-                    try {
-                        const containers = document.querySelectorAll(containerSelector);
-                        if (containers.length > 0) {
-                            const found = extractProducts(
-                                containerSelector,
-                                {
-                                    title: Array.isArray(this.selectors.results.title) 
-                                        ? this.selectors.results.title[0] 
-                                        : this.selectors.results.title,
-                                    price: Array.isArray(this.selectors.results.price) 
-                                        ? this.selectors.results.price[0] 
-                                        : this.selectors.results.price,
-                                    link: Array.isArray(this.selectors.results.link) 
-                                        ? this.selectors.results.link[0] 
-                                        : this.selectors.results.link,
-                                    image: Array.isArray(this.selectors.results.image) 
-                                        ? this.selectors.results.image[0] 
-                                        : this.selectors.results.image,
-                                    rating: Array.isArray(this.selectors.results.rating) 
-                                        ? this.selectors.results.rating[0] 
-                                        : this.selectors.results.rating,
-                                    reviews: '._13vcmD',
-                                }
-                            );
-                            if (found.length > 0) {
-                                results = found;
-                                logger.info(`Flipkart: Successfully extracted ${found.length} products with selector: ${containerSelector}`);
-                                break;
+            for (const selector of containerSelectors) {
+                try {
+                    await waitForCondition(async () => {
+                        const found = extractProducts(
+                            selector,
+                            {
+                                title: this.selectors.results.title,
+                                price: this.selectors.results.price,
+                                link: this.selectors.results.link,
+                                image: this.selectors.results.image,
+                                rating: this.selectors.results.rating,
+                                reviews: '._13vcmD',
                             }
+                        );
+                        if (found.length > 0) {
+                            products = found;
+                            return true;
                         }
-                    } catch (e) {
-                        logger.warn(`Flipkart: Selector ${containerSelector} failed`, { error: e.message });
+                        return false;
+                    }, { timeout: 3000, interval: 500 });
+                    
+                    if (products.length > 0) {
+                        logger.info(`Flipkart: Successfully extracted ${products.length} products with selector: ${selector}`);
+                        break;
                     }
+                } catch (e) {
+                    logger.debug(`Flipkart: Selector ${selector} failed or timed out`);
                 }
-                return results;
-            };
+            }
 
-            try {
-                await waitForCondition(async () => {
-                    products = extract();
-                    return products.length > 0;
-                }, { timeout: 5000, interval: 500 });
-            } catch (e) {
-                logger.warn('Flipkart: Wait for products timed out, trying manual extraction');
+            if (products.length === 0) {
+                logger.warn('Flipkart: No products found with any selector, trying manual extraction');
                 products = this._manualExtractProducts();
             }
             
-            // Filter out sponsored items
-            const nonSponsored = products.filter((product, index) => {
-                // ... same as before
-                const selector = Array.isArray(this.selectors.results.container) ? this.selectors.results.container[0] : this.selectors.results.container;
-                const containers = document.querySelectorAll(selector);
-                const container = containers[index];
-                if (!container) return true; // keep if container not found
-                
-                const text = container.textContent || container.innerText || '';
-                const isSponsored = 
-                    text.includes('Sponsored') ||
-                    text.includes('Ad') ||
-                    container.querySelector('[class*="sponsored" i]') ||
-                    container.querySelector('[class*="ad" i]') ||
-                    container.closest('[class*="sponsored" i]') ||
-                    container.closest('[class*="ad" i]');
-                
-                if (isSponsored) {
-                    logger.info('Flipkart: Filtered out sponsored product', { title: product.title });
-                }
-                
-                return !isSponsored;
+            // Filter out sponsored items - additional pass for Flipkart
+            const nonSponsored = products.filter(product => {
+                const titleLower = (product.title || '').toLowerCase();
+                const garbageKeywords = ['sponsored', 'ad', 'promoted'];
+                return !garbageKeywords.some(kw => titleLower.includes(kw));
             });
-            
+
             // Ensure all products are plain serializable objects
             const serializableProducts = nonSponsored.map(product => ({
                 index: typeof product.index === 'number' ? product.index : 0,
@@ -333,12 +376,28 @@ export class FlipkartPlatform extends EcommercePlatform {
     }
 
     async selectProduct(productIndex = 0) {
-        const products = await this.getSearchResults();
-        if (productIndex >= products.length) {
-            throw new Error(`Product index ${productIndex} out of range`);
+        try {
+            const products = await this.getSearchResults();
+            if (products.length === 0) {
+                throw new Error('No products found to select');
+            }
+            if (productIndex >= products.length) {
+                throw new Error(`Product index ${productIndex} out of range (max ${products.length - 1})`);
+            }
+            
+            const product = products[productIndex];
+            logger.info('Flipkart: Selecting product', { index: productIndex, title: product.title, link: product.link });
+            
+            if (!product.link || product.link === '') {
+                throw new Error('Product link is missing');
+            }
+
+            await clickProduct(product.link);
+            return product;
+        } catch (error) {
+            logger.error('Flipkart: Failed to select product', error);
+            throw error;
         }
-        await clickProduct(products[productIndex].link);
-        return products[productIndex];
     }
 
     async addToCart() {

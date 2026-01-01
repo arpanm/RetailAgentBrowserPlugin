@@ -42,9 +42,11 @@ export async function findElement(selectors, options = {}) {
 /**
  * Find multiple elements
  */
-export function findElements(selector, parent = document) {
+export function findElements(selector, parent = null) {
     try {
-        const elements = parent.querySelectorAll(selector);
+        const root = parent || (typeof document !== 'undefined' ? document : null);
+        if (!root) return [];
+        const elements = root.querySelectorAll(selector);
         return Array.from(elements);
     } catch (error) {
         logger.warn(`Failed to find elements with selector: ${selector}`, { error: error.message });
@@ -61,7 +63,8 @@ export async function waitForElement(selector, options = {}) {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeout) {
-        const element = document.querySelector(selector);
+        const root = typeof document !== 'undefined' ? document : null;
+        const element = root ? root.querySelector(selector) : null;
         if (element) {
             return element;
         }
@@ -92,6 +95,7 @@ export function getAttribute(element, attribute, fallback = '') {
  */
 export function isVisible(element) {
     if (!element) return false;
+    if (typeof window === 'undefined') return true; // Fallback for non-browser context if element somehow exists
     const style = window.getComputedStyle(element);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
 }
@@ -124,28 +128,115 @@ export async function safeClick(element, options = {}) {
         throw new DOMError('Cannot click: element is null', '');
     }
 
-    try {
-        // Scroll into view first
-        await scrollIntoView(element, options.scrollOptions);
-        
-        // Wait for element to be clickable
-        if (options.waitForClickable) {
-            await waitForClickable(element, options.waitTimeout || 5000);
-        }
+    const {
+        scrollOptions = {},
+        waitForClickable: shouldWait = true,
+        waitTimeout = 5000,
+        useDispatchEvent = false,
+        retries = 3,
+        retryDelay = 500,
+        tryParent = true,
+        useMultipleStrategies = true
+    } = options;
 
-        // Try different click methods
-        if (options.useDispatchEvent) {
-            element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        } else {
-            element.click();
-        }
+    let lastError = null;
 
-        logger.debug('Element clicked successfully');
-        return true;
-    } catch (error) {
-        logger.error('Failed to click element', error);
-        throw error;
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            // Scroll into view first
+            await scrollIntoView(element, scrollOptions);
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+            // Wait for element to be clickable
+            if (shouldWait) {
+                await waitForClickable(element, waitTimeout);
+            }
+
+            // Try multiple click strategies
+            let clickSucceeded = false;
+            
+            if (useMultipleStrategies) {
+                // Strategy 1: Direct click
+                try {
+                    element.click();
+                    clickSucceeded = true;
+                    logger.debug('Direct click succeeded', { attempt });
+                } catch (e1) {
+                    logger.debug('Direct click failed, trying MouseEvent', { attempt });
+                    
+                    // Strategy 2: MouseEvent with bubbles
+                    try {
+                        const event = new MouseEvent('click', {
+                            view: window,
+                            bubbles: true,
+                            cancelable: true,
+                            buttons: 1
+                        });
+                        element.dispatchEvent(event);
+                        clickSucceeded = true;
+                        logger.debug('MouseEvent click succeeded', { attempt });
+                    } catch (e2) {
+                        logger.debug('MouseEvent failed, trying parent element', { attempt });
+                        
+                        // Strategy 3: Parent element click (for nested elements)
+                        if (tryParent && element.parentElement) {
+                            try {
+                                element.parentElement.click();
+                                clickSucceeded = true;
+                                logger.debug('Parent element click succeeded', { attempt });
+                            } catch (e3) {
+                                logger.debug('Parent click failed, trying mousedown/mouseup', { attempt });
+                                
+                                // Strategy 4: Simulate full mouse interaction
+                                try {
+                                    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                                    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                                    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                    clickSucceeded = true;
+                                    logger.debug('Full mouse simulation succeeded', { attempt });
+                                } catch (e4) {
+                                    lastError = e4;
+                                }
+                            }
+                        } else {
+                            lastError = e2;
+                        }
+                    }
+                }
+            } else {
+                // Simple click method
+                if (useDispatchEvent) {
+                    element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                } else {
+                    element.click();
+                }
+                clickSucceeded = true;
+            }
+
+            if (clickSucceeded) {
+                logger.debug('Element clicked successfully', { attempt });
+                return true;
+            } else if (attempt < retries - 1) {
+                // Wait before retry with exponential backoff
+                const delay = retryDelay * Math.pow(1.5, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        } catch (error) {
+            lastError = error;
+            logger.debug('Click attempt failed', { attempt, error: error.message });
+            
+            if (attempt < retries - 1) {
+                // Wait before retry
+                const delay = retryDelay * Math.pow(1.5, attempt);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
     }
+
+    // All attempts failed
+    const errorMsg = lastError ? lastError.message : 'Unknown error';
+    logger.error('Failed to click element after all attempts', { retries, error: errorMsg });
+    throw new DOMError(`Failed to click element after ${retries} attempts: ${errorMsg}`, '');
 }
 
 /**

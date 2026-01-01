@@ -50,18 +50,12 @@
                 "https://www.amazon.de/*",
                 "https://www.amazon.fr/*"
             ],
-            "js": [
-                "src/content/amazon.js"
-            ],
+            "js": ["src/content/amazon-loader.js"],
             "run_at": "document_idle"
         },
         {
-            "matches": [
-                "https://www.flipkart.com/*"
-            ],
-            "js": [
-                "src/content/flipkart.js"
-            ],
+            "matches": ["https://www.flipkart.com/*"],
+            "js": ["src/content/flipkart-loader.js"],
             "run_at": "document_idle"
         },
         {
@@ -69,18 +63,12 @@
                 "https://www.ebay.com/*",
                 "https://www.ebay.in/*"
             ],
-            "js": [
-                "src/content/ebay.js"
-            ],
+            "js": ["src/content/ebay-loader.js"],
             "run_at": "document_idle"
         },
         {
-            "matches": [
-                "https://www.walmart.com/*"
-            ],
-            "js": [
-                "src/content/walmart.js"
-            ],
+            "matches": ["https://www.walmart.com/*"],
+            "js": ["src/content/walmart-loader.js"],
             "run_at": "document_idle"
         }
     ],
@@ -91,7 +79,13 @@
     },
     "web_accessible_resources": [
         {
-            "resources": ["docs/privacy-policy.html", "src/content/shared/login-handlers.js"],
+            "resources": [
+                "docs/privacy-policy.html",
+                "src/content/*.js",
+                "src/content/shared/*.js",
+                "src/content/platforms/*.js",
+                "src/lib/*.js"
+            ],
             "matches": ["<all_urls>"]
         }
     ],

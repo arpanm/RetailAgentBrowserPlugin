@@ -6,7 +6,7 @@ import { FlipkartPlatform } from './platforms/flipkart-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
 import { navigateToFlipkartLogin, clickFlipkartLoginButton, enterFlipkartPhoneNumber, sendFlipkartOTP, checkFlipkartLoginProgress } from './shared/login-handlers.js';
-import { filterProducts, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
+import { getSimplifiedPageContent } from './shared/actions.js';
 
 // Register Flipkart platform
 const flipkartPlatform = new FlipkartPlatform();
@@ -18,6 +18,15 @@ chrome.runtime.sendMessage({ type: 'PAGE_LOADED', url: window.location.href }).c
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Handle async operations properly
+    if (request.action === 'EXTRACT_PAGE_CONTENT') {
+        getSimplifiedPageContent('flipkart').then(content => {
+            sendResponse({ content, success: true });
+        }).catch(err => {
+            sendResponse({ success: false, error: err.message });
+        });
+        return true;
+    }
+
     if (request.action === 'SEARCH') {
         (async () => {
             try {
@@ -50,42 +59,28 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         (async () => {
             try {
                 const products = await flipkartPlatform.getSearchResults();
+                logger.info(`Flipkart: Found ${products.length} products (sending ALL to service worker for processing)`);
                 
-                // Filter products if filters provided
-                let filteredProducts = products;
-                if (request.filters && Object.keys(request.filters).length > 0) {
-                    try {
-                        // First pass: filter out unavailable
-                        filteredProducts = products.filter(item => !isUnavailable(item));
-                        
-                        // Second pass: apply filter matching
-                        filteredProducts = filterProducts(filteredProducts, request.filters);
-                        
-                        logger.info('Flipkart: Filtered products', { 
-                            original: products.length,
-                            afterUnavailable: products.filter(item => !isUnavailable(item)).length,
-                            filtered: filteredProducts.length,
-                            filters: Object.keys(request.filters)
-                        });
-                        
-                        // If no products match filters, log why
-                        if (filteredProducts.length === 0 && products.length > 0) {
-                            logger.warn('Flipkart: No products matched filters', {
-                                totalProducts: products.length,
-                                filters: request.filters,
-                                sampleProducts: products.slice(0, 3).map(p => ({
-                                    title: p.title?.substring(0, 60),
-                                    matches: matchesFilters(p, request.filters)
-                                }))
-                            });
-                        }
-                    } catch (filterError) {
-                        logger.warn('Flipkart: Filtering failed, using all products', { error: filterError.message });
-                        filteredProducts = products;
-                    }
-                }
+                // Send ALL products to service worker - filtering will be done there
+                // This ensures products are available for LLM analysis even if rule-based filtering fails
                 
-                const serializableProducts = JSON.parse(JSON.stringify(filteredProducts));
+                // Only filter out clearly invalid products (no title or link)
+                const validProducts = products.filter(item => {
+                    const hasTitle = item.title && item.title.trim().length > 0;
+                    const hasLink = item.link && item.link.trim().length > 0;
+                    return hasTitle && hasLink;
+                });
+                
+                logger.info('Flipkart: Valid products after basic validation', { 
+                    original: products.length,
+                    valid: validProducts.length
+                });
+                
+                const serializableProducts = JSON.parse(JSON.stringify(validProducts));
+                logger.info('Flipkart: Sending response', { 
+                    itemCount: serializableProducts.length,
+                    sampleTitles: serializableProducts.slice(0, 3).map(p => p.title?.substring(0, 50))
+                });
                 sendResponse({ items: serializableProducts, success: true });
             } catch (error) {
                 logger.error('Flipkart: Failed to get search results', error);
