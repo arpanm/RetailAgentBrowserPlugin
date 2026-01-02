@@ -8,6 +8,13 @@ import { loginManager } from '../lib/login-manager.js';
 import { rankResults, isUnavailable, matchesFilters } from '../lib/product-matcher.js';
 import { analyzePage, ANALYSIS_MODES, extractAttributesWithLLM } from '../lib/page-analyzer.js';
 import { compareProducts, groupSimilarProducts, formatComparisonResult } from '../lib/product-comparator.js';
+import {
+    NonceCache,
+    SUPPORTED_PROTOCOL_VERSION,
+    validateHandshake,
+    isOriginAllowed,
+    redactSensitive,
+} from './bridge-security.js';
 
 
 // Create minimal platform instances for service worker
@@ -57,6 +64,69 @@ class SWShopifyPlatform extends EcommercePlatform {
     }
 }
 
+class SWAjioPlatform extends EcommercePlatform {
+    constructor() {
+        super('ajio', {
+            enabled: true,
+            domains: ['ajio.com'],
+        });
+    }
+}
+
+class SWJioMartPlatform extends EcommercePlatform {
+    constructor() {
+        super('jiomart', {
+            enabled: true,
+            domains: ['jiomart.com'],
+        });
+    }
+}
+
+class SWRelianceDigitalPlatform extends EcommercePlatform {
+    constructor() {
+        super('reliancedigital', {
+            enabled: true,
+            domains: ['reliancedigital.in'],
+        });
+    }
+}
+
+class SWTiraBeautyPlatform extends EcommercePlatform {
+    constructor() {
+        super('tirabeauty', {
+            enabled: true,
+            domains: ['tirabeauty.com'],
+        });
+    }
+}
+
+class SWBigBasketPlatform extends EcommercePlatform {
+    constructor() {
+        super('bigbasket', {
+            enabled: true,
+            domains: ['bigbasket.com'],
+        });
+    }
+}
+
+class SWBlinkitPlatform extends EcommercePlatform {
+    constructor() {
+        super('blinkit', {
+            enabled: true,
+            domains: ['blinkit.com'],
+        });
+    }
+}
+
+class SWZeptoPlatform extends EcommercePlatform {
+    constructor() {
+        super('zepto', {
+            enabled: true,
+            domains: ['zepto.com', 'www.zepto.com'],
+        });
+    }
+}
+
 // Register platforms immediately
 try {
     platformRegistry.register(new SWAmazonPlatform());
@@ -64,6 +134,13 @@ try {
     platformRegistry.register(new SWEbayPlatform());
     platformRegistry.register(new SWWalmartPlatform());
     platformRegistry.register(new SWShopifyPlatform());
+    platformRegistry.register(new SWAjioPlatform());
+    platformRegistry.register(new SWJioMartPlatform());
+    platformRegistry.register(new SWRelianceDigitalPlatform());
+    platformRegistry.register(new SWTiraBeautyPlatform());
+    platformRegistry.register(new SWBigBasketPlatform());
+    platformRegistry.register(new SWBlinkitPlatform());
+    platformRegistry.register(new SWZeptoPlatform());
     
     logger.info('Platforms registered in service worker', { 
         count: platformRegistry.getAll().length,
@@ -106,6 +183,373 @@ export function resetState() {
 // Initialize login manager
 loginManager.initialize().catch(error => {
     logger.error('Failed to initialize login manager', error);
+});
+
+// Bridge security helpers
+const nonceCache = new NonceCache();
+const allowedOrigins = [
+    'https://ai-retail-concierge.vercel.app',
+    'http://localhost:5173',
+];
+const activePorts = new Map(); // sessionId -> port
+const activeJobs = new Map(); // sessionId -> { id, type, status, startedAt }
+const sensitiveCommands = new Set(['buyNow', 'addToCart', 'openProduct', 'trackOrder', 'cancelOrder', 'initiateReturn', 'supportTicket', 'reorder']);
+const STORAGE_KEYS = ['geminiApiKey', 'openaiApiKey', 'anthropicApiKey', 'preferences'];
+
+function genSessionId() {
+    return (crypto?.randomUUID?.() ?? `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+}
+
+function genJobId() {
+    return (crypto?.randomUUID?.() ?? `job_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+}
+
+function startJob(sessionId, type) {
+    // Cancel any existing job for this session to avoid collisions
+    cancelJob(sessionId, 'superseded');
+    const job = { id: genJobId(), type, status: 'running', startedAt: Date.now() };
+    activeJobs.set(sessionId, job);
+    return job;
+}
+
+function cancelJob(sessionId, reason = 'disconnected') {
+    const job = activeJobs.get(sessionId);
+    if (job) {
+        job.status = 'cancelled';
+        job.cancelledAt = Date.now();
+        job.reason = reason;
+        activeJobs.delete(sessionId);
+    }
+    return job;
+}
+
+function getPort(sessionId) {
+    return activePorts.get(sessionId);
+}
+
+function emitToSession(sessionId, message) {
+    const port = getPort(sessionId);
+    if (!port) return;
+    port.postMessage(redactSensitive(message));
+}
+
+function emitLog(sessionId, level, message, context = {}) {
+    logger[level]?.(message, context);
+    emitToSession(sessionId, { type: 'log', level, message, context: redactSensitive(context) });
+}
+
+function emitProgress(sessionId, step, detail) {
+    emitToSession(sessionId, { type: 'progress', step, detail });
+}
+
+function mapError(err) {
+    const code = err?.code || err?.message || 'unknown_error';
+    const message = code;
+    return { code, message, retryable: false };
+}
+
+function emitErrorEvent(sessionId, jobId, err, context = {}) {
+    const mapped = mapError(err);
+    emitToSession(sessionId, {
+        type: 'error',
+        jobId,
+        error: mapped.message,
+        code: mapped.code,
+        retryable: mapped.retryable,
+        context: redactSensitive(context),
+    });
+}
+
+// Test hooks
+export function __test_registerPort(sessionId, port) {
+    activePorts.set(sessionId, port);
+}
+export function __test_clearPorts() {
+    activePorts.clear();
+}
+export const __test_handleWebCommand = handleWebCommand;
+
+function enforceUserGesture(command, payload = {}) {
+    if (sensitiveCommands.has(command) && !payload.userGesture) {
+        const err = new Error('user_gesture_required');
+        err.code = 'user_gesture_required';
+        throw err;
+    }
+}
+
+async function parseIntentLocal(query) {
+    if (!query || typeof query !== 'string') {
+        throw new Error('invalid_query');
+    }
+    // Simple heuristic parser; can be replaced with LLM-backed parsing.
+    const lowered = query.toLowerCase();
+    const intentType = lowered.includes('track')
+        ? 'track'
+        : lowered.includes('compare') || lowered.includes('best')
+            ? 'compare'
+            : 'buy';
+    return {
+        intentType,
+        query,
+        filters: {},
+        platforms: [],
+    };
+}
+
+async function openPlatformSearchTab(platform, query) {
+    const url = `https://www.${platform}.com/s?k=${encodeURIComponent(query)}`;
+    const tab = await chrome.tabs.create({ url, active: false });
+    // best-effort message to content script; ignore errors
+    chrome.tabs.sendMessage(tab.id, { type: 'SEARCH', query }).catch(() => { });
+    return tab;
+}
+
+function pickWinner(products = []) {
+    if (!Array.isArray(products) || products.length === 0) return null;
+    const sorted = [...products].sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
+    return sorted[0];
+}
+
+async function closeTabs(tabs = []) {
+    for (const t of tabs) {
+        if (t?.tabId) {
+            try {
+                await chrome.tabs.remove(t.tabId);
+            } catch (_e) {
+                // ignore
+            }
+        }
+    }
+}
+
+async function handleWebCommand(msg, sessionId) {
+    const { command, payload = {} } = msg || {};
+    enforceUserGesture(command, payload);
+    const sensitiveCommands = new Set([
+        'buyNow',
+        'addToCart',
+        'openProduct',
+        'trackOrder',
+        'cancelOrder',
+        'initiateReturn',
+        'supportTicket',
+        'reorder',
+    ]);
+    if (sensitiveCommands.has(command)) {
+        const stored = await chrome.storage.local.get('preferences');
+        const granted = stored?.preferences?.grantedCapabilities || [];
+        if (!granted.includes(command)) {
+            emitToSession(sessionId, {
+                type: 'needsUserAction',
+                jobId: `cap-${Date.now()}`,
+                reason: 'capability_required',
+                actionHint: command,
+            });
+            return;
+        }
+    }
+    const job = startJob(sessionId, command);
+    emitProgress(sessionId, command, { jobId: job.id });
+    try {
+        switch (command) {
+            case 'parseIntent': {
+                const result = await parseIntentLocal(payload.query);
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id, result });
+                break;
+            }
+            case 'searchPlatforms': {
+                const intent = payload.intent || {};
+                const query = intent.query || payload.query;
+                if (!query) throw new Error('invalid_query');
+                const platforms = intent.platforms && intent.platforms.length > 0
+                    ? intent.platforms
+                    : ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'];
+                const opened = [];
+                for (const p of platforms) {
+                    try {
+                        const tab = await openPlatformSearchTab(p, query);
+                        opened.push({ platform: p, tabId: tab.id });
+                        emitToSession(sessionId, { type: 'tabOpened', platform: p, tabId: tab.id });
+                    } catch (e) {
+                        emitToSession(sessionId, { type: 'error', platform: p, error: e?.message || 'open_failed' });
+                    }
+                }
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id, opened });
+                break;
+            }
+            case 'compare': {
+                const products = payload.products || [];
+                const winner = pickWinner(products);
+                if (payload?.opened && payload.opened.length) {
+                    const losers = payload.opened.filter((t) => t.platform !== winner?.platform);
+                    closeTabs(losers);
+                }
+                job.status = 'completed';
+                emitToSession(sessionId, {
+                    type: 'comparisonReady',
+                    jobId: job.id,
+                    result: { candidates: products, winnerId: winner?.id, winner },
+                });
+                emitToSession(sessionId, { type: 'completed', jobId: job.id });
+                break;
+            }
+            case 'cancelJob': {
+                const cancelled = cancelJob(sessionId, 'user_cancelled');
+                if (cancelled?.tabId) {
+                    try { await chrome.tabs.remove(cancelled.tabId); } catch (_e) {}
+                }
+                emitToSession(sessionId, { type: 'bridge/jobCancelled', jobId: cancelled?.id, reason: 'user_cancelled' });
+                job.status = 'completed';
+                break;
+            }
+            case 'resumeJob': {
+                emitToSession(sessionId, { type: 'log', level: 'info', message: 'resume requested - stub' });
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id, result: { resumed: false, reason: 'not_supported' } });
+                break;
+            }
+            case 'openProduct': {
+                const product = payload.product;
+                if (!product?.url) throw new Error('invalid_product');
+                const tab = await chrome.tabs.create({ url: product.url, active: true });
+                emitToSession(sessionId, { type: 'productOpened', jobId: job.id, productId: product.id, tabId: tab.id });
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id });
+                break;
+            }
+            case 'buyNow':
+            case 'addToCart': {
+                const product = payload.product;
+                if (!product?.url) throw new Error('invalid_product');
+                const tab = await chrome.tabs.create({ url: product.url, active: true });
+                emitToSession(sessionId, { type: 'productOpened', jobId: job.id, productId: product.id, tabId: tab.id });
+                // Placeholder: stop at boundary, ask user to proceed
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'needsUserAction', jobId: job.id, reason: 'checkout_boundary' });
+                emitToSession(sessionId, { type: 'completed', jobId: job.id });
+                break;
+            }
+            case 'trackOrder': {
+                // Placeholder: best-effort; real impl would query platform-specific trackers.
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id, result: { status: 'unknown' } });
+                break;
+            }
+            case 'cancelOrder':
+            case 'initiateReturn':
+            case 'supportTicket':
+            case 'reorder': {
+                // Assistive only: emit needsUserAction and complete.
+                job.status = 'completed';
+                emitToSession(sessionId, {
+                    type: 'needsUserAction',
+                    jobId: job.id,
+                    reason: 'manual_step_required',
+                    actionHint: command,
+                });
+                emitToSession(sessionId, { type: 'completed', jobId: job.id });
+                break;
+            }
+            case 'setPreferences': {
+                // Store API keys and preferences locally; redact keys on emission.
+                const { geminiApiKey, openaiApiKey, anthropicApiKey, preferences } = payload || {};
+                await chrome.storage.local.set({
+                    geminiApiKey,
+                    openaiApiKey,
+                    anthropicApiKey,
+                    preferences,
+                });
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id });
+                break;
+            }
+            case 'getPreferences': {
+                const data = await chrome.storage.local.get(STORAGE_KEYS);
+                // Redact keys before emitting.
+                const redacted = { ...data };
+                if (redacted.geminiApiKey) redacted.geminiApiKey = '[redacted]';
+                if (redacted.openaiApiKey) redacted.openaiApiKey = '[redacted]';
+                if (redacted.anthropicApiKey) redacted.anthropicApiKey = '[redacted]';
+                job.status = 'completed';
+                emitToSession(sessionId, { type: 'completed', jobId: job.id, data: redacted });
+                break;
+            }
+            default:
+                throw new Error('unsupported_command');
+        }
+    } catch (err) {
+        job.status = 'error';
+        emitErrorEvent(sessionId, job.id, err, { command });
+        throw err;
+    }
+}
+
+function handleHandshake(message, sender, sendResponse) {
+    try {
+        validateHandshake(
+            {
+                origin: sender?.origin,
+                protocolVersion: message.protocolVersion,
+                nonce: message.nonce,
+            },
+            allowedOrigins,
+            nonceCache
+        );
+        const sessionId = genSessionId();
+        sendResponse({
+            ok: true,
+            sessionId,
+            protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+        });
+    } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'handshake_failed' });
+    }
+}
+
+// Handle external messages (web ↔ extension bridge)
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    const origin = sender?.origin;
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+        sendResponse({ ok: false, error: 'origin_not_allowed' });
+        return false;
+    }
+    if (message?.type === 'WEBAPP_HANDSHAKE') {
+        handleHandshake(message, sender, sendResponse);
+        return true;
+    }
+    return false;
+});
+
+// Long-lived port connections for streaming events
+chrome.runtime.onConnectExternal.addListener((port) => {
+    const origin = port?.sender?.origin;
+    if (!isOriginAllowed(origin, allowedOrigins)) {
+        port.postMessage({ type: 'bridge/error', error: 'origin_not_allowed' });
+        port.disconnect();
+        return;
+    }
+    const sessionId = genSessionId();
+    activePorts.set(sessionId, port);
+    port.postMessage({ type: 'bridge/connected', sessionId, protocolVersion: SUPPORTED_PROTOCOL_VERSION });
+
+    port.onDisconnect.addListener(() => {
+        activePorts.delete(sessionId);
+        const cancelled = cancelJob(sessionId, 'port_disconnected');
+        if (cancelled) {
+            emitToSession(sessionId, { type: 'bridge/jobCancelled', jobId: cancelled.id, reason: 'port_disconnected' });
+        }
+    });
+
+    port.onMessage.addListener((msg) => {
+        logger.debug?.('bridge:received', redactSensitive(msg));
+        if (msg?.command) {
+            handleWebCommand(msg, sessionId).catch((err) => {
+                emitToSession(sessionId, { type: 'error', error: err?.message || 'command_error' });
+            });
+        }
+    });
 });
 
 // Open side panel when extension icon is clicked

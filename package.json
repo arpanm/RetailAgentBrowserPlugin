@@ -9,10 +9,12 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:e2e": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=e2e",
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=unit",
-    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=integration"
+    "test:integration": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=integration",
+    "build": "rm -rf dist && mkdir -p dist && cp manifest.json dist/ && cp -R icons dist/ && cp -R docs dist/ && cp -R src dist/ && esbuild src/background/service_worker.js --bundle --format=esm --target=chrome110 --outfile=dist/service_worker.js"
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",
+    "esbuild": "^0.21.5",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
     "puppeteer": "^21.6.1"

@@ -161,17 +161,17 @@ Example for common patterns:
                 }
             };
             
-            platformInfo = platformPatterns[platform?.toLowerCase()] || platformPatterns.amazon;
-            
+            const filterPlatformInfo = platformPatterns[platform?.toLowerCase()] || platformPatterns.amazon;
+
             return baseInstruction + `
 Your task is to understand available filters on the page and recommend which filters to apply.
 
 Platform: ${platform || 'unknown'}
 Platform-specific information:
-- Filter container selectors: ${platformInfo.filterContainer}
-- Filter group selectors: ${platformInfo.filterGroup}
-- Clickable filter selectors: ${platformInfo.clickable}
-- Price input selectors: ${platformInfo.priceInputs}
+- Filter container selectors: ${filterPlatformInfo.filterContainer}
+- Filter group selectors: ${filterPlatformInfo.filterGroup}
+- Clickable filter selectors: ${filterPlatformInfo.clickable}
+- Price input selectors: ${filterPlatformInfo.priceInputs}
 
 Analyze the filters section carefully and identify:
 1. **Available filter categories** (Brand, RAM, Battery, Storage, Price Range, Rating, etc.)

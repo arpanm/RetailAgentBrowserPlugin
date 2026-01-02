@@ -23,6 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const deliveryWeightValue = document.getElementById('delivery-weight-value');
   const availabilityWeightValue = document.getElementById('availability-weight-value');
 
+  // Guard: if key DOM nodes are missing, abort binding to avoid null addEventListener errors
+  if (!messagesDiv || !userInput || !sendBtn || !settingsBtn || !clearChatBtn || !settingsModal || !apiKeyInput || !saveSettingsBtn || !closeSettingsBtn) {
+    console.error('Popup DOM not ready: required elements missing');
+    return;
+  }
+
   // Load settings
   if (chrome && chrome.storage && chrome.storage.local) {
     chrome.storage.local.get(['geminiApiKey', 'phoneNumber', 'loggedInPlatforms', 'retailAgentConfig'], (result) => {
@@ -157,32 +163,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  settingsBtn.addEventListener('click', () => {
+  settingsBtn?.addEventListener('click', () => {
     settingsModal.classList.remove('hidden');
   });
 
-  closeSettingsBtn.addEventListener('click', () => {
+  closeSettingsBtn?.addEventListener('click', () => {
     settingsModal.classList.add('hidden');
   });
 
   // Slider event listeners to update display values
-  priceWeightSlider.addEventListener('input', (e) => {
-    priceWeightValue.textContent = `${e.target.value}%`;
-  });
+  if (priceWeightSlider && priceWeightValue) {
+    priceWeightSlider.addEventListener('input', (e) => {
+      priceWeightValue.textContent = `${e.target.value}%`;
+    });
+  }
   
-  ratingWeightSlider.addEventListener('input', (e) => {
-    ratingWeightValue.textContent = `${e.target.value}%`;
-  });
+  if (ratingWeightSlider && ratingWeightValue) {
+    ratingWeightSlider.addEventListener('input', (e) => {
+      ratingWeightValue.textContent = `${e.target.value}%`;
+    });
+  }
   
-  deliveryWeightSlider.addEventListener('input', (e) => {
-    deliveryWeightValue.textContent = `${e.target.value}%`;
-  });
+  if (deliveryWeightSlider && deliveryWeightValue) {
+    deliveryWeightSlider.addEventListener('input', (e) => {
+      deliveryWeightValue.textContent = `${e.target.value}%`;
+    });
+  }
   
-  availabilityWeightSlider.addEventListener('input', (e) => {
-    availabilityWeightValue.textContent = `${e.target.value}%`;
-  });
+  if (availabilityWeightSlider && availabilityWeightValue) {
+    availabilityWeightSlider.addEventListener('input', (e) => {
+      availabilityWeightValue.textContent = `${e.target.value}%`;
+    });
+  }
   
-  saveSettingsBtn.addEventListener('click', () => {
+  saveSettingsBtn?.addEventListener('click', () => {
     const key = apiKeyInput.value.trim();
     const phone = phoneNumberInput.value.trim();
     
@@ -197,11 +211,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // Save comparison preferences
     chrome.storage.local.get(['retailAgentConfig'], (result) => {
       const config = result.retailAgentConfig || {};
+      const priceVal = priceWeightSlider ? parseInt(priceWeightSlider.value) / 100 : 0.4;
+      const ratingVal = ratingWeightSlider ? parseInt(ratingWeightSlider.value) / 100 : 0.3;
+      const deliveryVal = deliveryWeightSlider ? parseInt(deliveryWeightSlider.value) / 100 : 0.2;
+      const availabilityVal = availabilityWeightSlider ? parseInt(availabilityWeightSlider.value) / 100 : 0.1;
+
       config.comparisonPreferences = {
-        priceWeight: parseInt(priceWeightSlider.value) / 100,
-        ratingWeight: parseInt(ratingWeightSlider.value) / 100,
-        deliveryWeight: parseInt(deliveryWeightSlider.value) / 100,
-        availabilityWeight: parseInt(availabilityWeightSlider.value) / 100
+        priceWeight: priceVal,
+        ratingWeight: ratingVal,
+        deliveryWeight: deliveryVal,
+        availabilityWeight: availabilityVal
       };
       
       updates.retailAgentConfig = config;
@@ -217,7 +236,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Platform login button
-  loginPlatformsBtn.addEventListener('click', async () => {
+  loginPlatformsBtn?.addEventListener('click', async () => {
     const selectedPlatforms = [];
     ['amazon', 'flipkart', 'ebay', 'walmart'].forEach(platform => {
       const checkbox = document.getElementById(`${platform}-login`);
@@ -367,7 +386,7 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Messages that should be grouped as intermediate/collapsible
   // Everything else that's a system message and NOT a final message
-  const isIntermediateMessage = (text, sender) => {
+  function isIntermediateMessage(text, sender) {
     // User messages are never intermediate
     if (sender !== 'system') return false;
     
@@ -376,7 +395,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // All other system messages are intermediate
     return true;
-  };
+  }
 
   function appendMessage(sender, text, saveToStorage = true) {
     // Close any open collapsible group for user messages

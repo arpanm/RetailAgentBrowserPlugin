@@ -13,6 +13,12 @@
         "geolocation",
         "sidePanel"
     ],
+    "externally_connectable": {
+        "matches": [
+            "https://ai-retail-concierge.vercel.app/*",
+            "http://localhost:5173/*"
+        ]
+    },
     "host_permissions": [
         "https://www.amazon.in/*",
         "https://www.amazon.com/*",
@@ -23,11 +29,20 @@
         "https://www.ebay.com/*",
         "https://www.ebay.in/*",
         "https://www.walmart.com/*",
+        "https://www.ajio.com/*",
+        "https://www.jiomart.com/*",
+        "https://www.reliancedigital.in/*",
+        "https://www.tirabeauty.com/*",
+        "https://www.bigbasket.com/*",
+        "https://blinkit.com/*",
+        "https://www.blinkit.com/*",
+        "https://www.zepto.com/*",
+        "https://zepto.com/*",
         "https://generativelanguage.googleapis.com/*",
         "https://maps.googleapis.com/*"
     ],
     "background": {
-        "service_worker": "src/background/service_worker.js",
+        "service_worker": "service_worker.js",
         "type": "module"
     },
     "action": {
@@ -69,6 +84,41 @@
         {
             "matches": ["https://www.walmart.com/*"],
             "js": ["src/content/walmart-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.ajio.com/*"],
+            "js": ["src/content/ajio-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.jiomart.com/*"],
+            "js": ["src/content/jiomart-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.reliancedigital.in/*"],
+            "js": ["src/content/reliancedigital-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.tirabeauty.com/*"],
+            "js": ["src/content/tirabeauty-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.bigbasket.com/*"],
+            "js": ["src/content/bigbasket-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://blinkit.com/*", "https://www.blinkit.com/*"],
+            "js": ["src/content/blinkit-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.zepto.com/*", "https://zepto.com/*"],
+            "js": ["src/content/zepto-loader.js"],
             "run_at": "document_idle"
         }
     ],
