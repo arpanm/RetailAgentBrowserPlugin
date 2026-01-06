@@ -1445,11 +1445,18 @@ function refineSearchQuery(data) {
     // Remove "undefined" prefix if it somehow got in
     refinedQuery = refinedQuery.replace(/^undefined\s+/i, '');
     
-    // Remove common stop words at the beginning that might confuse search
-    refinedQuery = refinedQuery.replace(/^(buy|find|search for|look for|get|i want to buy|show me|i need)\s+/i, '');
+    // Remove common verbs at the beginning (buy, find, search, etc.)
+    refinedQuery = refinedQuery.replace(/^(buy|find|search for|search|look for|get|i want to buy|show me|i need|order|purchase)\s+/i, '');
     
-    // Remove platform references from query (e.g., "from flipkart", "from amazon", "on flipkart")
-    refinedQuery = refinedQuery.replace(/\b(from|on|at|in)\s+(flipkart|amazon|ebay|walmart|shopify|flipkaart)\b/gi, '');
+    // Remove ALL platform references from query (e.g., "from flipkart", "from amazon", "on reliancedigital")
+    // This includes all supported platforms
+    const allPlatforms = 'flipkart|amazon|ebay|walmart|shopify|ajio|jiomart|jio mart|reliancedigital|reliance digital|tirabeauty|tira beauty|tira|bigbasket|big basket|blinkit|zepto';
+    const platformRegex = new RegExp(`\\b(from|on|at|in)\\s+(${allPlatforms})\\b`, 'gi');
+    refinedQuery = refinedQuery.replace(platformRegex, '');
+    
+    // Also remove platform names at the end of the query (e.g., "Samsung phone Ajio")
+    const platformEndRegex = new RegExp(`\\b(${allPlatforms})\\b\\s*$`, 'gi');
+    refinedQuery = refinedQuery.replace(platformEndRegex, '');
 
     // Transform "greater than" / "less than" / "more than" into search-friendly terms
     // Handle cases like "greater than 5000", "more than 6gb", "above 4.5 rating"
@@ -1930,9 +1937,16 @@ export async function executeNextStep(tabId) {
                     logger.info('Filters applied, waiting for results...', { filters });
                     logAction('Filters applied, waiting for results...', 'info');
                     
-                    // Check if platform uses AJAX (Flipkart, eBay) or page reload (Amazon)
-                    const platformName = currentState.data.platform?.name || 'unknown';
-                    const usesAjax = ['flipkart', 'ebay'].includes(platformName);
+                    // Get platform name correctly - it's stored as a string, not object
+                    const platformName = typeof currentState.data.platform === 'string' 
+                        ? currentState.data.platform 
+                        : (currentState.data.platform?.name || currentState.platform?.name || 'unknown');
+                    
+                    // Platforms that use AJAX/SPA navigation (don't reload page on filter)
+                    // Most modern platforms use AJAX, only Amazon requires full page reload
+                    const usesAjax = ['flipkart', 'ebay', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'].includes(platformName);
+                    
+                    logger.info('Filter handling - platform detection', { platformName, usesAjax });
                     
                     if (usesAjax) {
                         // For AJAX platforms, wait for DOM to update but don't return
@@ -1940,10 +1954,10 @@ export async function executeNextStep(tabId) {
                         logger.info('Filter applied via AJAX, continuing to get results...', { platformName });
                         // Continue to get search results below
                     } else {
-                        // For page reload platforms, wait for reload
-                    await new Promise(resolve => setTimeout(resolve, 5000));
-                    // No need to continue here, next PAGE_LOADED will trigger again
-                    return;
+                        // For page reload platforms (Amazon), wait for reload
+                        await new Promise(resolve => setTimeout(resolve, 5000));
+                        // No need to continue here, next PAGE_LOADED will trigger again
+                        return;
                     }
                 }
             } catch (filterError) {

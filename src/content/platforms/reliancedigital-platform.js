@@ -1,10 +1,13 @@
 /**
  * RelianceDigital Platform Implementation
+ * 
+ * Search Flow:
+ * 1. Find search input
+ * 2. Type query
+ * 3. Press Enter to search
  */
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow } from '../shared/actions.js';
-import { findElement, safeClick, fillInput, getText, waitForCondition } from '../shared/selectors.js';
 import { logger } from '../../lib/logger.js';
 
 export class RelianceDigitalPlatform extends EcommercePlatform {
@@ -14,21 +17,14 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
             domains: ['reliancedigital.in'],
             selectors: {
                 search: {
-                    input: 'input[name="searchTerm"], input[type="search"], input[placeholder*="Search" i], input[id*="search" i]',
-                    button: 'button[type="submit"], .search-icon, [class*="search-btn"], svg[class*="search"]',
+                    input: 'input[name="searchTerm"], input[type="search"], input[placeholder*="Search" i]',
+                    button: 'button[type="submit"]',
                 },
                 results: {
-                    container: [
-                        '[class*="sp__product"]',
-                        '[class*="product-item"]',
-                        '[class*="product-card"]',
-                        '.product',
-                        '[data-testid*="product"]'
-                    ],
-                    title: '[class*="sp__name"], [class*="product-name"], h2, h3, a[href*="/product"]',
-                    link: 'a[href*="/product"], a[href*="/p/"]',
-                    price: '[class*="TextWeb__Text"], [class*="price"], .pdp__offerPrice',
-                    rating: '[class*="rating"]',
+                    container: '[class*="sp__product"], [class*="product-card"], [class*="product-item"]',
+                    title: '[class*="sp__name"], h2, h3',
+                    link: 'a[href*="/product"], a',
+                    price: '[class*="price"]',
                     image: 'img',
                 },
                 product: {
@@ -36,10 +32,9 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
                         'button[class*="add-to-cart"]',
                         'button[class*="addtocart"]',
                         '[class*="pdp__button"]',
-                        'button[class*="btn-primary"]',
-                        '[data-testid="pdp-add-to-cart"]'
+                        'button[class*="btn-primary"]'
                     ],
-                    addToCart: 'button[class*="add-to-cart"], button[class*="addtocart"]',
+                    addToCart: 'button[class*="add-to-cart"]',
                     title: 'h1, [class*="pdp__title"]',
                     price: '[class*="pdp__offerPrice"], [class*="price"]',
                 },
@@ -49,9 +44,9 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
 
     async search(query, filters = {}, sort = null) {
         try {
-            logger.info('RelianceDigital: Performing search', { query, filters, sort });
+            logger.info('RelianceDigital: Performing search', { query });
             
-            // Find search input
+            // Step 1: Find search input
             const inputSelectors = [
                 'input[name="searchTerm"]',
                 'input[type="search"]',
@@ -62,69 +57,61 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
             
             let searchInput = null;
             for (const sel of inputSelectors) {
-                searchInput = document.querySelector(sel);
-                if (searchInput) {
-                    logger.info(`RelianceDigital: Found search input with selector: ${sel}`);
-                    break;
+                const inputs = document.querySelectorAll(sel);
+                for (const inp of inputs) {
+                    if (inp.offsetParent !== null) {
+                        searchInput = inp;
+                        logger.info(`RelianceDigital: Found search input: ${sel}`);
+                        break;
+                    }
                 }
+                if (searchInput) break;
             }
             
             if (!searchInput) {
                 throw new Error('Search input not found');
             }
             
-            // Focus and fill input
+            // Step 2: Focus, clear, and type
             searchInput.focus();
             searchInput.value = '';
+            await new Promise(r => setTimeout(r, 200));
             
-            // Type character by character for React
-            for (const char of query) {
-                searchInput.value += char;
-                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-                await new Promise(r => setTimeout(r, 50));
-            }
-            
+            // Set value directly
+            searchInput.value = query;
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
             searchInput.dispatchEvent(new Event('change', { bubbles: true }));
             
-            // Wait a bit for autocomplete
-            await new Promise(resolve => setTimeout(resolve, 500));
+            logger.info('RelianceDigital: Query entered, pressing Enter...');
+            await new Promise(r => setTimeout(r, 300));
             
-            // Try to click search button
-            const buttonSelectors = [
-                'button[type="submit"]',
-                '[class*="search-icon"]',
-                '[class*="search-btn"]',
-                'button[class*="search"]'
-            ];
+            // Step 3: Press Enter - this is what works
+            const enterEvent = new KeyboardEvent('keydown', {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                cancelable: true
+            });
+            searchInput.dispatchEvent(enterEvent);
             
-            let clicked = false;
-            for (const sel of buttonSelectors) {
-                const btn = document.querySelector(sel);
-                if (btn && btn.offsetParent !== null) {
-                    btn.click();
-                    clicked = true;
-                    logger.info(`RelianceDigital: Clicked search button with selector: ${sel}`);
-                    break;
-                }
-            }
+            // Also dispatch keyup
+            searchInput.dispatchEvent(new KeyboardEvent('keyup', {
+                key: 'Enter',
+                code: 'Enter', 
+                keyCode: 13,
+                which: 13,
+                bubbles: true
+            }));
             
-            if (!clicked) {
-                // Press Enter
-                searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                searchInput.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-                
-                // Try form submit
-                const form = searchInput.closest('form');
-                if (form) {
-                    form.submit();
-                }
-                logger.info('RelianceDigital: Pressed Enter to search');
+            // Try form submit as backup
+            const form = searchInput.closest('form');
+            if (form) {
+                form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
             }
             
             logger.info('RelianceDigital: Search submitted', { query });
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
             return true;
         } catch (error) {
             logger.error('RelianceDigital: Search failed', error);
@@ -134,48 +121,39 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
 
     async getSearchResults() {
         try {
-            logger.info('RelianceDigital: Extracting products from page');
-            
-            // Wait for products to load
+            logger.info('RelianceDigital: Extracting products');
             await new Promise(resolve => setTimeout(resolve, 2000));
             
             const products = [];
-            
-            // Try multiple selectors for product containers
             const containerSelectors = [
                 '[class*="sp__product"]',
                 '[class*="product-card"]',
-                '[class*="product-item"]',
-                '.product'
+                '[class*="product-item"]'
             ];
             
             let containers = [];
             for (const selector of containerSelectors) {
                 containers = document.querySelectorAll(selector);
                 if (containers.length > 0) {
-                    logger.info(`RelianceDigital: Found ${containers.length} products with selector: ${selector}`);
+                    logger.info(`RelianceDigital: Found ${containers.length} products`);
                     break;
                 }
             }
             
             containers.forEach((container, idx) => {
                 try {
-                    // Find link
                     const linkEl = container.querySelector('a[href*="/product"]') || container.querySelector('a');
                     if (!linkEl) return;
                     
                     const href = linkEl.href || linkEl.getAttribute('href');
                     if (!href) return;
                     
-                    // Find title
-                    const titleEl = container.querySelector('[class*="sp__name"]') || container.querySelector('h2, h3') || linkEl;
-                    const title = titleEl?.textContent?.trim() || 'Unknown Product';
+                    const titleEl = container.querySelector('[class*="sp__name"], h2, h3') || linkEl;
+                    const title = titleEl?.textContent?.trim() || 'Product';
                     
-                    // Find price
                     const priceEl = container.querySelector('[class*="price"]');
                     const price = priceEl?.textContent?.trim() || '';
                     
-                    // Find image
                     const imgEl = container.querySelector('img');
                     const image = imgEl?.src || '';
                     
@@ -187,19 +165,17 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
                         price,
                         link: fullUrl,
                         image,
-                        rating: '',
-                        reviews: '',
                         platform: 'reliancedigital'
                     });
                 } catch (e) {
-                    logger.warn('RelianceDigital: Failed to extract product', { index: idx, error: e.message });
+                    // Skip
                 }
             });
             
             logger.info(`RelianceDigital: Extracted ${products.length} products`);
             return products;
         } catch (error) {
-            logger.error('RelianceDigital: Failed to get search results', error);
+            logger.error('RelianceDigital: Failed to get results', error);
             throw error;
         }
     }
@@ -208,20 +184,12 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
         try {
             const products = await this.getSearchResults();
             if (products.length === 0) {
-                throw new Error('No products found to select');
+                throw new Error('No products found');
             }
-            if (productIndex >= products.length) {
-                productIndex = 0;
-            }
-
-            const product = products[productIndex];
-            logger.info('RelianceDigital: Selecting product', { index: productIndex, title: product.title, link: product.link });
             
-            if (!product.link || product.link === '') {
-                throw new Error('Product link is missing');
-            }
-
-            // Navigate directly to product page
+            const product = products[Math.min(productIndex, products.length - 1)];
+            logger.info('RelianceDigital: Opening product', { title: product.title });
+            
             window.location.href = product.link;
             return product;
         } catch (error) {
@@ -230,72 +198,39 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
         }
     }
 
-    async addToCart() {
+    async buyNow() {
         try {
-            logger.info('RelianceDigital: Adding to cart');
-            const selectors = Array.isArray(this.selectors.product.addToCart) 
-                ? this.selectors.product.addToCart 
-                : this.selectors.product.addToCart.split(', ');
+            logger.info('RelianceDigital: Clicking Add to Cart');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const selectors = this.selectors.product.buyNow;
             
             for (const selector of selectors) {
                 const btn = document.querySelector(selector);
                 if (btn && btn.offsetParent !== null) {
                     btn.click();
-                    logger.info('RelianceDigital: Add to cart clicked');
+                    logger.info('RelianceDigital: Add to Cart clicked');
                     return true;
                 }
             }
-            throw new Error('Add to cart button not found');
+            
+            throw new Error('Add to Cart button not found');
         } catch (error) {
-            logger.error('RelianceDigital: Failed to add to cart', error);
+            logger.error('RelianceDigital: Failed to click button', error);
             throw error;
         }
     }
 
-    async buyNow() {
-        try {
-            logger.info('RelianceDigital: Clicking Buy Now / Add to Cart');
-            
-            // Wait for page to load
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            const selectors = Array.isArray(this.selectors.product.buyNow) 
-                ? this.selectors.product.buyNow 
-                : [this.selectors.product.buyNow];
-            
-            for (const selector of selectors) {
-                try {
-                    const btn = document.querySelector(selector);
-                    if (btn && btn.offsetParent !== null) {
-                        logger.info(`RelianceDigital: Found button with selector: ${selector}`);
-                        btn.click();
-                        logger.info('RelianceDigital: Buy Now clicked successfully');
-                        return true;
-                    }
-                } catch (e) {
-                    logger.warn(`RelianceDigital: Selector ${selector} failed`, { error: e.message });
-                }
-            }
-            
-            throw new Error('Buy Now button not found');
-        } catch (error) {
-            logger.error('RelianceDigital: Failed to click Buy Now', error);
-            throw error;
-        }
+    async addToCart() {
+        return this.buyNow();
     }
 
     async getProductDetails() {
         try {
-            const title = document.querySelector(this.selectors.product.title)?.textContent?.trim() || '';
-            const price = document.querySelector(this.selectors.product.price)?.textContent?.trim() || '';
-            
-            return {
-                title,
-                price,
-                url: globalThis.location.href,
-            };
+            const title = document.querySelector('h1, [class*="pdp__title"]')?.textContent?.trim() || '';
+            const price = document.querySelector('[class*="pdp__offerPrice"], [class*="price"]')?.textContent?.trim() || '';
+            return { title, price, url: window.location.href };
         } catch (error) {
-            logger.error('RelianceDigital: Failed to get product details', error);
             throw error;
         }
     }
