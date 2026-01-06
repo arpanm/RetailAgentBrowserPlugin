@@ -74,6 +74,26 @@
             "run_at": "document_idle"
         },
         {
+            "matches": ["https://www.ajio.com/*"],
+            "js": ["src/content/ajio-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.jiomart.com/*"],
+            "js": ["src/content/jiomart-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.reliancedigital.in/*"],
+            "js": ["src/content/reliancedigital-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": ["https://www.tirabeauty.com/*"],
+            "js": ["src/content/tirabeauty-loader.js"],
+            "run_at": "document_idle"
+        },
+        {
             "matches": [
                 "https://www.ebay.com/*",
                 "https://www.ebay.in/*"

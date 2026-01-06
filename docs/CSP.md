@@ -19,3 +19,4 @@
 - Audit new third-party scripts before adding to CSP.
 - Ensure Supabase Edge Functions send proper CORS/CSP headers for webapp origins.
 
+

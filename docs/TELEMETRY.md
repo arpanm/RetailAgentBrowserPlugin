@@ -6,3 +6,4 @@
 - Redaction: run through `redactSensitive` before emitting; strip contact/address/payment fields.
 - Transport: future hook to send to a backend; keep disabled unless configured.
 
+

@@ -21,6 +21,16 @@ describe("Service worker commands (happy paths)", () => {
                 create: jest.fn().mockResolvedValue({ id: 101 }),
                 sendMessage: jest.fn().mockResolvedValue({ success: true }),
             },
+            runtime: {
+                onMessageExternal: { addListener: jest.fn(), removeListener: jest.fn() },
+                onConnectExternal: { addListener: jest.fn(), removeListener: jest.fn() },
+            },
+            storage: {
+                local: {
+                    get: jest.fn().mockResolvedValue({ preferences: { grantedCapabilities: [] } }),
+                    set: jest.fn().mockResolvedValue(),
+                },
+            },
         };
     });
 

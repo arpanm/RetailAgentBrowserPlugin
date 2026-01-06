@@ -12,3 +12,4 @@
 - **Artifacts**: produce zip for Web Store upload; keep changelog.
 - **Store submission**: fill listing, screenshots, privacy description (local-only by default).
 
+

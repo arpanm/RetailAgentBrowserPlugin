@@ -2,7 +2,7 @@
  * Unit tests for Config Manager
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { configManager } from '../../src/lib/config.js';
 
 // Mock chrome.storage
@@ -17,7 +17,7 @@ global.chrome = {
 
 describe('ConfigManager', () => {
     beforeEach(() => {
-        vi.clearAllMocks();
+        jest.clearAllMocks();
         // Deep copy config to avoid test interference
         configManager.config = JSON.parse(JSON.stringify(configManager.config));
     });

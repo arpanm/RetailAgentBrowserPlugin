@@ -2,21 +2,22 @@
  * Unit tests for Retry Logic
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { retryWithBackoff, RetryConfig, retryDOMOperation, retryAPICall } from '../../src/lib/retry.js';
 
 describe('Retry Logic', () => {
     beforeEach(() => {
-        vi.useFakeTimers();
+        jest.useFakeTimers();
     });
 
     afterEach(() => {
-        vi.restoreAllMocks();
+        jest.useRealTimers();
+        jest.restoreAllMocks();
     });
 
     describe('retryWithBackoff', () => {
         it('should succeed on first attempt', async () => {
-            const fn = vi.fn().mockResolvedValue('success');
+            const fn = jest.fn().mockResolvedValue('success');
             const result = await retryWithBackoff(fn);
             expect(result).toBe('success');
             expect(fn).toHaveBeenCalledTimes(1);
@@ -26,14 +27,14 @@ describe('Retry Logic', () => {
             const networkError = new Error('network error');
             networkError.name = 'NetworkError';
             
-            const fn = vi.fn()
+            const fn = jest.fn()
                 .mockRejectedValueOnce(networkError)
                 .mockResolvedValue('success');
 
             const promise = retryWithBackoff(fn, new RetryConfig({ maxRetries: 2, initialDelay: 100 }));
             
             // Fast-forward time
-            await vi.advanceTimersByTimeAsync(200);
+            jest.advanceTimersByTime(200);
             
             const result = await promise;
             expect(result).toBe('success');
@@ -45,7 +46,7 @@ describe('Retry Logic', () => {
             const networkError = new Error('network error');
             networkError.name = 'NetworkError';
             
-            const fn = vi.fn().mockRejectedValue(networkError);
+            const fn = jest.fn().mockRejectedValue(networkError);
             const config = new RetryConfig({ maxRetries: 2, initialDelay: 10, maxDelay: 50 });
 
             await expect(retryWithBackoff(fn, config)).rejects.toThrow('network error');

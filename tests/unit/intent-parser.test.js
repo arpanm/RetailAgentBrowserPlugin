@@ -2,20 +2,20 @@
  * Unit tests for Intent Parser
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 
 // Mock the gemini module
-vi.mock('../../src/lib/gemini.js', () => ({
-    generateContent: vi.fn(),
-    setLogAction: vi.fn(),
-    listModels: vi.fn(),
+jest.mock('../../src/lib/gemini.js', () => ({
+    generateContent: jest.fn(),
+    setLogAction: jest.fn(),
+    listModels: jest.fn(),
 }));
 
 import { generateContent } from '../../src/lib/gemini.js';
 
 describe('Intent Parser', () => {
     beforeEach(() => {
-        vi.clearAllMocks();
+        jest.clearAllMocks();
     });
 
     it('should parse product intent', async () => {

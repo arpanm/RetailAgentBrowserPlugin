@@ -2,7 +2,7 @@
  * Unit tests for Error Handler
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from '@jest/globals';
 import { ErrorHandler, RetailAgentError, APIError, DOMError, IntentParseError } from '../../src/lib/error-handler.js';
 
 describe('ErrorHandler', () => {

@@ -20,3 +20,4 @@
 - Extension bridge must enforce origin allowlist, handshake, capability gating.
 - Platform automation should be covered by fixture-based tests per platform.
 
+

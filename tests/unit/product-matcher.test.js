@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from '@jest/globals';
 import { matchesFilters, rankResults, verifyAttributes, isUnavailable } from '../../src/lib/product-matcher.js';
 
 describe('Product Matcher', () => {

@@ -5,7 +5,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const settingsBtn = document.getElementById('settings-btn');
   const clearChatBtn = document.getElementById('clear-chat-btn');
   const settingsModal = document.getElementById('settings-modal');
+  const providerSelect = document.getElementById('llm-provider');
   const apiKeyInput = document.getElementById('api-key');
+  const openaiKeyInput = document.getElementById('openai-api-key');
+  const anthropicKeyInput = document.getElementById('anthropic-api-key');
   const phoneNumberInput = document.getElementById('phone-number');
   const saveSettingsBtn = document.getElementById('save-settings');
   const checkModelsBtn = document.getElementById('check-models');
@@ -24,45 +27,69 @@ document.addEventListener('DOMContentLoaded', () => {
   const availabilityWeightValue = document.getElementById('availability-weight-value');
 
   // Guard: if key DOM nodes are missing, abort binding to avoid null addEventListener errors
-  if (!messagesDiv || !userInput || !sendBtn || !settingsBtn || !clearChatBtn || !settingsModal || !apiKeyInput || !saveSettingsBtn || !closeSettingsBtn) {
+  if (!messagesDiv || !userInput || !sendBtn || !settingsBtn || !clearChatBtn || !settingsModal || !apiKeyInput || !openaiKeyInput || !anthropicKeyInput || !providerSelect || !saveSettingsBtn || !closeSettingsBtn) {
     console.error('Popup DOM not ready: required elements missing');
     return;
   }
 
+  // Track current collapsible group (must be defined before any use)
+  let currentCollapsibleGroup = null;
+  let collapsibleMessageCount = 0;
+
   // Load settings
   if (chrome && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(['geminiApiKey', 'phoneNumber', 'loggedInPlatforms', 'retailAgentConfig'], (result) => {
-      if (result.geminiApiKey) {
+    chrome.storage.local.get(['geminiApiKey', 'openaiApiKey', 'anthropicApiKey', 'llmProvider', 'phoneNumber', 'loggedInPlatforms', 'enabledPlatforms', 'retailAgentConfig'], (result) => {
+      if (result.geminiApiKey && apiKeyInput) {
         apiKeyInput.value = result.geminiApiKey;
-      } else {
-        appendMessage('system', 'Please set your Gemini API Key in settings first.');
+      }
+      if (result.openaiApiKey && openaiKeyInput) {
+        openaiKeyInput.value = result.openaiApiKey;
+      }
+      if (result.anthropicApiKey && anthropicKeyInput) {
+        anthropicKeyInput.value = result.anthropicApiKey;
+      }
+      if (result.llmProvider && providerSelect) {
+        providerSelect.value = result.llmProvider;
+      } else if (providerSelect) {
+        providerSelect.value = 'auto';
+      }
+      if (!result.geminiApiKey && !result.openaiApiKey && !result.anthropicApiKey) {
+        appendMessage('system', 'Please set your API Key (Gemini/OpenAI/Anthropic) in settings first.');
         settingsModal.classList.remove('hidden');
       }
       
-      if (result.phoneNumber) {
+      if (result.phoneNumber && phoneNumberInput) {
         phoneNumberInput.value = result.phoneNumber;
       }
       
       // Load comparison preferences
       if (result.retailAgentConfig && result.retailAgentConfig.comparisonPreferences) {
         const prefs = result.retailAgentConfig.comparisonPreferences;
-        priceWeightSlider.value = (prefs.priceWeight * 100) || 40;
-        ratingWeightSlider.value = (prefs.ratingWeight * 100) || 30;
-        deliveryWeightSlider.value = (prefs.deliveryWeight * 100) || 20;
-        availabilityWeightSlider.value = (prefs.availabilityWeight * 100) || 10;
-        
-        priceWeightValue.textContent = `${priceWeightSlider.value}%`;
-        ratingWeightValue.textContent = `${ratingWeightSlider.value}%`;
-        deliveryWeightValue.textContent = `${deliveryWeightSlider.value}%`;
-        availabilityWeightValue.textContent = `${availabilityWeightSlider.value}%`;
+        if (priceWeightSlider && priceWeightValue) {
+          priceWeightSlider.value = (prefs.priceWeight * 100) || 40;
+          priceWeightValue.textContent = `${priceWeightSlider.value}%`;
+        }
+        if (ratingWeightSlider && ratingWeightValue) {
+          ratingWeightSlider.value = (prefs.ratingWeight * 100) || 30;
+          ratingWeightValue.textContent = `${ratingWeightSlider.value}%`;
+        }
+        if (deliveryWeightSlider && deliveryWeightValue) {
+          deliveryWeightSlider.value = (prefs.deliveryWeight * 100) || 20;
+          deliveryWeightValue.textContent = `${deliveryWeightSlider.value}%`;
+        }
+        if (availabilityWeightSlider && availabilityWeightValue) {
+          availabilityWeightSlider.value = (prefs.availabilityWeight * 100) || 10;
+          availabilityWeightValue.textContent = `${availabilityWeightSlider.value}%`;
+        }
       }
       
       // Load platform login status
       const loggedInPlatforms = result.loggedInPlatforms || [];
-      ['amazon', 'flipkart', 'ebay', 'walmart'].forEach(platform => {
+      const enabledPlatforms = result.enabledPlatforms || [];
+      ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'].forEach(platform => {
         const checkbox = document.getElementById(`${platform}-login`);
         if (checkbox) {
-          checkbox.checked = loggedInPlatforms.includes(platform);
+          checkbox.checked = loggedInPlatforms.includes(platform) || enabledPlatforms.includes(platform);
         }
       });
     });
@@ -85,22 +112,32 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   checkModelsBtn.addEventListener('click', () => {
-    const key = apiKeyInput.value.trim();
-    if (!key) {
-      appendMessage('system', 'Enter API Key first');
+    const provider = providerSelect?.value || 'auto';
+    let key = '';
+    if (provider === 'openai') {
+      key = openaiKeyInput.value.trim();
+    } else if (provider === 'anthropic') {
+      key = anthropicKeyInput.value.trim();
+    } else if (provider === 'gemini') {
+      key = apiKeyInput.value.trim();
+    }
+
+    if (provider !== 'auto' && !key) {
+      appendMessage('system', `Enter ${provider} API Key first`);
       return;
     }
 
     if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
-      appendMessage('system', 'Checking models...');
-      chrome.runtime.sendMessage({ type: 'CHECK_MODELS', apiKey: key }, (response) => {
+      appendMessage('system', provider === 'auto' ? 'Checking best available models...' : `Checking ${provider} models...`);
+      chrome.runtime.sendMessage({ type: 'CHECK_MODELS', provider, apiKey: key }, (response) => {
         if (chrome.runtime.lastError) {
           appendMessage('system', 'Runtime Error: ' + chrome.runtime.lastError.message);
         } else if (response && response.error) {
           appendMessage('system', 'API Error: ' + response.error);
         } else if (response && response.models) {
           const names = response.models.map(m => m.name.replace('models/', '')).join(', ');
-          appendMessage('system', 'Available Models: ' + names);
+          const chosen = response.chosen ? ` | Selected: ${response.chosen.provider}:${response.chosen.model}` : '';
+          appendMessage('system', 'Available Models: ' + names + chosen);
         } else {
           appendMessage('system', 'Unknown response from background script.');
         }
@@ -135,20 +172,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Clear chat button
-  clearChatBtn.addEventListener('click', () => {
+  clearChatBtn?.addEventListener('click', () => {
     if (confirm('Clear all messages and start over?')) {
-      messagesDiv.innerHTML = '';
+      if (messagesDiv) messagesDiv.innerHTML = '';
       currentCollapsibleGroup = null;
       collapsibleMessageCount = 0;
-      chrome.storage.local.set({ chatHistory: [] }, () => {
+      chrome.storage?.local.set({ chatHistory: [] }, () => {
         appendMessage('system', 'Chat cleared. How can I help you?');
       });
     }
   });
 
   // Handlers
-  sendBtn.addEventListener('click', sendMessage);
-  userInput.addEventListener('keypress', (e) => {
+  sendBtn?.addEventListener('click', sendMessage);
+  userInput?.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       sendMessage();
@@ -197,18 +234,31 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   
   saveSettingsBtn?.addEventListener('click', () => {
-    const key = apiKeyInput.value.trim();
+    const provider = providerSelect?.value || 'auto';
+    const geminiKey = apiKeyInput.value.trim();
+    const openaiKey = openaiKeyInput.value.trim();
+    const anthropicKey = anthropicKeyInput.value.trim();
     const phone = phoneNumberInput.value.trim();
     
+    // Gather enabled platforms from checkboxes
+    const selectedPlatforms = [];
+    ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'].forEach(platform => {
+      const checkbox = document.getElementById(`${platform}-login`);
+      if (checkbox && checkbox.checked) {
+        selectedPlatforms.push(platform);
+      }
+    });
+    
     const updates = {};
-    if (key) {
-      updates.geminiApiKey = key;
-    }
+    if (geminiKey) updates.geminiApiKey = geminiKey;
+    if (openaiKey) updates.openaiApiKey = openaiKey;
+    if (anthropicKey) updates.anthropicApiKey = anthropicKey;
+    updates.llmProvider = provider;
     if (phone) {
       updates.phoneNumber = phone;
     }
     
-    // Save comparison preferences
+    // Save comparison preferences and enabled platforms
     chrome.storage.local.get(['retailAgentConfig'], (result) => {
       const config = result.retailAgentConfig || {};
       const priceVal = priceWeightSlider ? parseInt(priceWeightSlider.value) / 100 : 0.4;
@@ -224,6 +274,7 @@ document.addEventListener('DOMContentLoaded', () => {
       };
       
       updates.retailAgentConfig = config;
+      updates.enabledPlatforms = selectedPlatforms;
       
       if (Object.keys(updates).length > 0) {
         chrome.storage.local.set(updates, () => {
@@ -238,7 +289,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Platform login button
   loginPlatformsBtn?.addEventListener('click', async () => {
     const selectedPlatforms = [];
-    ['amazon', 'flipkart', 'ebay', 'walmart'].forEach(platform => {
+    ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'].forEach(platform => {
       const checkbox = document.getElementById(`${platform}-login`);
       if (checkbox && checkbox.checked) {
         selectedPlatforms.push(platform);
@@ -356,10 +407,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Track current collapsible group
-  let currentCollapsibleGroup = null;
-  let collapsibleMessageCount = 0;
-  
   // Check if message is a final/important message (user needs to see)
   const isFinalMessage = (text) => {
     const finalPatterns = [

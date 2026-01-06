@@ -1,12 +1,15 @@
 /**
  * TiraBeauty Content Script Loader
+ * This wrapper loads the actual ES6 module content script
+ * Dynamic import() is allowed in content scripts (not service workers)
  */
+
 (async () => {
     try {
-        await import(chrome.runtime.getURL('src/content/platforms/tirabeauty-platform.js'));
-        console.log('RetailAgent: TiraBeauty content script loaded');
+        // Dynamic import the actual module
+        await import(chrome.runtime.getURL('src/content/tirabeauty.js'));
+        console.log('RetailAgent: TiraBeauty content script loaded successfully');
     } catch (error) {
         console.error('RetailAgent: Failed to load TiraBeauty content script', error);
     }
 })();
-

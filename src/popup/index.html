@@ -40,13 +40,37 @@
       <div class="modal-content">
         <h2 id="settings-title">Settings</h2>
         
+        <label for="llm-provider">LLM Provider:</label>
+        <select id="llm-provider" aria-label="LLM Provider">
+          <option value="auto" selected>Auto (pick best available)</option>
+          <option value="gemini">Gemini</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+
         <label for="api-key">Gemini API Key:</label>
         <input 
           type="password" 
           id="api-key" 
-          placeholder="Enter API Key"
+          placeholder="Enter Gemini API Key"
           aria-label="Gemini API Key"
-          aria-required="true">
+          aria-required="false">
+
+        <label for="openai-api-key">OpenAI API Key:</label>
+        <input
+          type="password"
+          id="openai-api-key"
+          placeholder="Enter OpenAI API Key"
+          aria-label="OpenAI API Key"
+          aria-required="false">
+
+        <label for="anthropic-api-key">Anthropic API Key:</label>
+        <input
+          type="password"
+          id="anthropic-api-key"
+          placeholder="Enter Anthropic API Key"
+          aria-label="Anthropic API Key"
+          aria-required="false">
         
         <label for="phone-number">Phone Number (for OTP login):</label>
         <input 
@@ -68,12 +92,32 @@
               <span>Flipkart</span>
             </label>
             <label class="platform-checkbox">
-              <input type="checkbox" id="ebay-login" data-platform="ebay">
-              <span>eBay</span>
+              <input type="checkbox" id="ajio-login" data-platform="ajio">
+              <span>Ajio</span>
             </label>
             <label class="platform-checkbox">
-              <input type="checkbox" id="walmart-login" data-platform="walmart">
-              <span>Walmart</span>
+              <input type="checkbox" id="jiomart-login" data-platform="jiomart">
+              <span>JioMart</span>
+            </label>
+            <label class="platform-checkbox">
+              <input type="checkbox" id="reliancedigital-login" data-platform="reliancedigital">
+              <span>RelianceDigital</span>
+            </label>
+            <label class="platform-checkbox">
+              <input type="checkbox" id="tirabeauty-login" data-platform="tirabeauty">
+              <span>TiraBeauty</span>
+            </label>
+            <label class="platform-checkbox">
+              <input type="checkbox" id="bigbasket-login" data-platform="bigbasket">
+              <span>BigBasket</span>
+            </label>
+            <label class="platform-checkbox">
+              <input type="checkbox" id="blinkit-login" data-platform="blinkit">
+              <span>Blinkit</span>
+            </label>
+            <label class="platform-checkbox">
+              <input type="checkbox" id="zepto-login" data-platform="zepto">
+              <span>Zepto</span>
             </label>
           </div>
           <button id="login-platforms-btn" class="secondary-btn">Login to Selected Platforms</button>

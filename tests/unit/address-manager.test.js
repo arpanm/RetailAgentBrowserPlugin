@@ -2,15 +2,15 @@
  * Unit tests for Address Manager
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { addressManager, Address } from '../../src/lib/address-manager.js';
 
 // Mock chrome.storage
 global.chrome = {
     storage: {
         local: {
-            get: vi.fn().mockResolvedValue({}),
-            set: vi.fn().mockResolvedValue(undefined),
+            get: jest.fn().mockResolvedValue({}),
+            set: jest.fn().mockResolvedValue(undefined),
         },
     },
 };

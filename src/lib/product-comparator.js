@@ -16,3 +16,4 @@ export function formatComparisonResult(result = {}) {
     return result;
 }
 
+

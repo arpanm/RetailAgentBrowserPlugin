@@ -364,25 +364,25 @@ todos:
       - W3-ext-command-buyNow
   - id: W8-platform-ajio
     content: Add Ajio.com platform to RetailAgent (search, extract, compare; buy assist best-effort)
-    status: pending
+    status: in_progress
     dependencies:
       - W1-req-platform-scope
       - W2-contract-types
   - id: W8-platform-jiomart
     content: Add JioMart.com platform to RetailAgent (search, extract, compare; buy assist best-effort)
-    status: pending
+    status: in_progress
     dependencies:
       - W1-req-platform-scope
       - W2-contract-types
   - id: W8-platform-reliancedigital
     content: Add RelianceDigital.in platform to RetailAgent (search, extract, compare; buy assist best-effort)
-    status: pending
+    status: in_progress
     dependencies:
       - W1-req-platform-scope
       - W2-contract-types
   - id: W8-platform-tirabeauty
     content: Add TiraBeauty.com platform to RetailAgent (search, extract, compare; buy assist best-effort)
-    status: pending
+    status: in_progress
     dependencies:
       - W1-req-platform-scope
       - W2-contract-types
@@ -784,3 +784,77 @@ Key additions:
 - search Amazon/Flipkart
 - compare results
 - let the user choose or auto-pick
+
+---
+
+## Popup:
+
+- Add OpenAI and Anthropic key fields and provider selector; persist/load all keys.
+- Harden DOM bindings to eliminate null/TDZ errors.
+
+## Ajio content script:
+
+- Search results: select product tiles (e.g., .item / [data-style="plp-product"]), title .name/h2, price .price/.price div, image img, link a[href*="/p/"], rating if present.
+- Product page: basic add-to-cart/buy assist boundary (emit needsUserAction).
+- Fixture HTML (from your provided search/product URLs) and unit test for extraction.
+
+## JioMart content script:
+
+- Search results: product cards section/article with [data-product-id] or .plp-card, title h2/.clsname, price .price/.offer-price, image img, link a[href*="/p/"], handle pincode/location gate by emitting needsUserAction when blocked.
+- Product page: assist boundary.
+- Fixture + unit test.
+
+## RelianceDigital content script:
+
+- Search results: cards .sp__product / [data-testid="productItem"], title h3/h2, price .pdp__offerPrice/.Price, image img, link a[href*="/product/"], rating if available.
+- Product page: assist boundary.
+- Fixture + unit test.
+
+## TiraBeauty content script:
+- Search results: cards [data-testid="product-card"] or .ProductCard, title .product-name/h3, price .price/.current-price, image img, link a[href*="/product"], rating if present.
+- Product page: assist boundary.
+- Fixture + unit test.
+
+## Service worker:
+- Ensure these platforms are registered and enabled; route search/open/buy assist to the new content scripts.
+
+## Tests:
+- Add fixtures and selector extraction tests for each new platform.
+- Popup test for provider fields load/save.
+
+
+## Sample Page Links:
+
+### search result:
+
+- Ajio: https://www.ajio.com/search/?text=Most%20affordable%20white%20full%20sleeves%20shirt%20with%204+%20star%20reviews 
+- JioMart: https://www.jiomart.com/search?q=Best%20budget%20wireless%20earbuds%20under%20%E2%82%B92000 
+- RelianceDigital: https://www.reliancedigital.in/products?q=samsung%20phone%206GB%20RAM&category=smart-phones&search_term=samsung%20phone%206GB%20RAM&internal_source=search_prompt&page_no=1&page_size=12&page_type=number 
+- TiraBeauty: https://www.tirabeauty.com/products/?q=Premium%20moisterizer%20for%20dry%20screen%20within%20500%20Rs 
+
+### Product Details:
+
+- Ajio: https://www.ajio.com/dennislingo-premium-attire-full-sleeves-slim-fit-shirt/p/462323964_white? 
+- JioMart: https://www.jiomart.com/p/electronics/noise-buds-trance-truly-wireless-earbuds-jet-black/606389363 
+- RelianceDigital: https://www.reliancedigital.in/product/galaxy-f17-5g-128-gb-6-gb-ram-lavender-mobile-phone-mfdv5t-9379819?internal_source=search_results  
+- TiraBeauty: https://www.tirabeauty.com/product/be-bodywise-4-aha-bha-underarm-roll-on-floral-fragrance-50ml-7577679 
+
+
+In the setting it is suppose to take all LLM API keys, and check whichever model is available and cache it for that day. And use the same.
+Also it is suppose to show all supported platforms, and allow user to select which all platforms it should consider, and avail login for all.
+
+
+## Search-page extraction (refine)
+- Add stable selectors per site for title/price/image/link/rating and ensure PRODUCTS_EXTRACTED is sent.
+- Add detection for location/pincode gates (JioMart/BigBasket/Blinkit/Zepto) and emit NEEDS_USER_ACTION with an action hint.
+## Product-page assist
+- For each platform, implement a product-page content script handler that:
+- Waits for main product title/price/variant.
+- Locates Add-to-Cart/Buy button; clicks until checkout boundary; emits needsUserAction for login/OTP/payment.
+- Reports productOpened/needsUserAction/completed back to SW.
+## Service worker wiring
+- Listen for PRODUCTS_EXTRACTED and needsUserAction from new platform scripts, store results per platform, and surface to the webapp.
+- Ensure buyNow/openProduct routes to the platform tab and expects the platform-specific content script to emit boundary events.
+
+please fx all the platforms (Ajio, JioMart, RelianceDigital, TiraBeauty) to do search after opening, then find the result products one by one to check title and attributes matching filters or not, open details page for first better matching product, find the buy now button and click on buy now.
+do all one by one in order, for all of them, without asking to continue.

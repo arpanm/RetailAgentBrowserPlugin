@@ -8,3 +8,4 @@
 - **CI**: run per-repo; avoid cross-repo builds to keep pipelines fast.
 - **When changing contracts**: update Zod schemas + adapter tests in web, mirror necessary fields in extension parse/comparison, and rerun both test suites.
 
+

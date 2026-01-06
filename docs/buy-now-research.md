@@ -436,3 +436,4 @@ async function clickBuyNowWithRetry(maxAttempts = 3) {
 - Browser DevTools Network tab for navigation tracking
 
 
+

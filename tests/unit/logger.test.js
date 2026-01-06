@@ -2,7 +2,7 @@
  * Unit tests for Logger
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { logger } from '../../src/lib/logger.js';
 
 describe('Logger', () => {
@@ -12,14 +12,14 @@ describe('Logger', () => {
     });
 
     it('should log info messages', () => {
-        const consoleSpy = vi.spyOn(console, 'log');
+        const consoleSpy = jest.spyOn(console, 'log');
         logger.info('Test message');
         expect(consoleSpy).toHaveBeenCalled();
         consoleSpy.mockRestore();
     });
 
     it('should log error messages', () => {
-        const consoleSpy = vi.spyOn(console, 'error');
+        const consoleSpy = jest.spyOn(console, 'error');
         logger.error('Test error');
         expect(consoleSpy).toHaveBeenCalled();
         consoleSpy.mockRestore();
@@ -27,7 +27,7 @@ describe('Logger', () => {
 
     it('should filter debug messages when level is INFO', () => {
         logger.setLevel('INFO');
-        const consoleSpy = vi.spyOn(console, 'debug');
+        const consoleSpy = jest.spyOn(console, 'debug');
         logger.debug('Debug message');
         expect(consoleSpy).not.toHaveBeenCalled();
         consoleSpy.mockRestore();

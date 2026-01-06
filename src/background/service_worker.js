@@ -195,6 +195,7 @@ const activePorts = new Map(); // sessionId -> port
 const activeJobs = new Map(); // sessionId -> { id, type, status, startedAt }
 const sensitiveCommands = new Set(['buyNow', 'addToCart', 'openProduct', 'trackOrder', 'cancelOrder', 'initiateReturn', 'supportTicket', 'reorder']);
 const STORAGE_KEYS = ['geminiApiKey', 'openaiApiKey', 'anthropicApiKey', 'preferences'];
+const LLM_CACHE_KEY = 'llmModelCache';
 
 function genSessionId() {
     return (crypto?.randomUUID?.() ?? `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`);
@@ -202,6 +203,44 @@ function genSessionId() {
 
 function genJobId() {
     return (crypto?.randomUUID?.() ?? `job_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+}
+async function chooseProviderAndModel() {
+    const today = new Date().toDateString();
+    const storedKeys = await chrome.storage.local.get(['geminiApiKey', 'openaiApiKey', 'anthropicApiKey', LLM_CACHE_KEY]);
+    const cache = storedKeys[LLM_CACHE_KEY];
+    if (cache && cache.date === today && cache.model && cache.provider) {
+        return cache;
+    }
+
+    const providers = [
+        { name: 'gemini', key: storedKeys.geminiApiKey, list: () => listModels(storedKeys.geminiApiKey) },
+        { name: 'openai', key: storedKeys.openaiApiKey, list: async () => ([
+            { name: 'gpt-4.1', displayName: 'gpt-4.1', supportedGenerationMethods: ['chat'] },
+            { name: 'gpt-4.1-mini', displayName: 'gpt-4.1-mini', supportedGenerationMethods: ['chat'] },
+            { name: 'gpt-4o-mini', displayName: 'gpt-4o-mini', supportedGenerationMethods: ['chat'] },
+        ]) },
+        { name: 'anthropic', key: storedKeys.anthropicApiKey, list: async () => ([
+            { name: 'claude-3-5-sonnet', displayName: 'claude-3.5-sonnet', supportedGenerationMethods: ['chat'] },
+            { name: 'claude-3-opus', displayName: 'claude-3-opus', supportedGenerationMethods: ['chat'] },
+            { name: 'claude-3-haiku', displayName: 'claude-3-haiku', supportedGenerationMethods: ['chat'] },
+        ]) },
+    ];
+
+    for (const p of providers) {
+        if (!p.key) continue;
+        try {
+            const models = await p.list();
+            const first = models?.[0];
+            if (first) {
+                const chosen = { provider: p.name, model: first.name, date: today };
+                await chrome.storage.local.set({ [LLM_CACHE_KEY]: chosen });
+                return chosen;
+            }
+        } catch (e) {
+            logger.warn(`Model discovery failed for ${p.name}`, { error: e?.message });
+        }
+    }
+    return null;
 }
 
 function startJob(sessionId, type) {
@@ -277,27 +316,79 @@ function enforceUserGesture(command, payload = {}) {
     }
 }
 
+function detectPlatformFromText(lowerText) {
+    // Order matters! Check more specific patterns first
+    if (lowerText.includes('amazon')) return 'amazon';
+    if (lowerText.includes('flipkart')) return 'flipkart';
+    if (lowerText.includes('ebay')) return 'ebay';
+    if (lowerText.includes('walmart')) return 'walmart';
+    // Check 'ajio' BEFORE 'jio' because 'ajio' contains 'jio'
+    if (lowerText.includes('ajio')) return 'ajio';
+    // Check 'jiomart' before 'jio' to be specific
+    if (lowerText.includes('jio mart') || lowerText.includes('jiomart')) return 'jiomart';
+    // Check 'reliance digital' before 'reliance'
+    if (lowerText.includes('reliance digital') || lowerText.includes('reliancedigital')) return 'reliancedigital';
+    // Check 'tira beauty' or 'tirabeauty' before 'tira'
+    if (lowerText.includes('tira beauty') || lowerText.includes('tirabeauty')) return 'tirabeauty';
+    if (lowerText.includes('bigbasket') || lowerText.includes('big basket')) return 'bigbasket';
+    if (lowerText.includes('blinkit')) return 'blinkit';
+    if (lowerText.includes('zepto')) return 'zepto';
+    // Fallback to partial matches (less specific)
+    if (lowerText.includes('jio')) return 'jiomart';
+    if (lowerText.includes('reliance')) return 'reliancedigital';
+    if (lowerText.includes('tira')) return 'tirabeauty';
+    return null;
+}
+
 async function parseIntentLocal(query) {
     if (!query || typeof query !== 'string') {
         throw new Error('invalid_query');
     }
-    // Simple heuristic parser; can be replaced with LLM-backed parsing.
     const lowered = query.toLowerCase();
     const intentType = lowered.includes('track')
         ? 'track'
         : lowered.includes('compare') || lowered.includes('best')
             ? 'compare'
             : 'buy';
+    const simple = parseIntentSimple(query);
+    const platform = detectPlatformFromText(lowered) || simple.platform || 'amazon';
     return {
         intentType,
         query,
-        filters: {},
-        platforms: [],
+        filters: simple.filters || {},
+        platforms: platform ? [platform] : [],
+        platform,
     };
 }
 
+function getSearchUrlForPlatform(platform, query) {
+    const q = encodeURIComponent(query);
+    switch (platform) {
+        case 'amazon':
+            return `https://www.amazon.in/s?k=${q}`;
+        case 'flipkart':
+            return `https://www.flipkart.com/search?q=${q}`;
+        case 'ajio':
+            return `https://www.ajio.com/search/?text=${q}`;
+        case 'jiomart':
+            return `https://www.jiomart.com/search?q=${q}`;
+        case 'reliancedigital':
+            return `https://www.reliancedigital.in/search?q=${q}`;
+        case 'tirabeauty':
+            return `https://www.tirabeauty.com/products/?q=${q}`;
+        case 'bigbasket':
+            return `https://www.bigbasket.com/ps/?q=${q}`;
+        case 'blinkit':
+            return `https://www.blinkit.com/s/?q=${q}`;
+        case 'zepto':
+            return `https://www.zepto.com/search?q=${q}`;
+        default:
+            return `https://www.${platform}.com/s?k=${q}`;
+    }
+}
+
 async function openPlatformSearchTab(platform, query) {
-    const url = `https://www.${platform}.com/s?k=${encodeURIComponent(query)}`;
+    const url = getSearchUrlForPlatform(platform, query);
     const tab = await chrome.tabs.create({ url, active: false });
     // best-effort message to content script; ignore errors
     chrome.tabs.sendMessage(tab.id, { type: 'SEARCH', query }).catch(() => { });
@@ -362,9 +453,15 @@ async function handleWebCommand(msg, sessionId) {
                 const intent = payload.intent || {};
                 const query = intent.query || payload.query;
                 if (!query) throw new Error('invalid_query');
-                const platforms = intent.platforms && intent.platforms.length > 0
+                let platforms = intent.platforms && intent.platforms.length > 0
                     ? intent.platforms
-                    : ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'];
+                    : [];
+                if (!platforms.length && intent.platform) {
+                    platforms = [intent.platform];
+                }
+                if (!platforms.length) {
+                    platforms = ['amazon', 'flipkart', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'];
+                }
                 const opened = [];
                 for (const p of platforms) {
                     try {
@@ -425,9 +522,15 @@ async function handleWebCommand(msg, sessionId) {
                 if (!product?.url) throw new Error('invalid_product');
                 const tab = await chrome.tabs.create({ url: product.url, active: true });
                 emitToSession(sessionId, { type: 'productOpened', jobId: job.id, productId: product.id, tabId: tab.id });
-                // Placeholder: stop at boundary, ask user to proceed
                 job.status = 'completed';
-                emitToSession(sessionId, { type: 'needsUserAction', jobId: job.id, reason: 'checkout_boundary' });
+                emitToSession(sessionId, {
+                    type: 'needsUserAction',
+                    jobId: job.id,
+                    reason: 'checkout_boundary',
+                    platform: product.platform,
+                    tabId: tab.id,
+                    product,
+                });
                 emitToSession(sessionId, { type: 'completed', jobId: job.id });
                 break;
             }
@@ -571,26 +674,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ status: 'processing' });
     }
     if (message.type === 'CHECK_MODELS') {
-        retryAPICall(() => listModels(message.apiKey), {
-            maxRetries: 2,
-            retryableErrors: [APIError]
-        })
-            .then(models => {
-                // Filter to only Gemini models
-                const geminiModels = (models || []).filter(m => 
-                    m.name && m.name.toLowerCase().includes('gemini')
-                ).map(m => ({
-                    name: m.name,
-                    displayName: m.displayName || m.name,
-                    supportedGenerationMethods: m.supportedGenerationMethods || []
-                }));
-                sendResponse({ models: geminiModels });
+        const provider = (message.provider || 'auto').toLowerCase();
+        if (provider === 'auto') {
+            chooseProviderAndModel()
+                .then(async (chosen) => {
+                    if (!chosen) {
+                        sendResponse({ error: 'No provider/model available. Configure at least one API key.' });
+                        return;
+                    }
+                    let models = [];
+                    if (chosen.provider === 'gemini') {
+                        models = await listModels((await chrome.storage.local.get(['geminiApiKey'])).geminiApiKey);
+                    } else if (chosen.provider === 'openai') {
+                        models = [
+                            { name: 'gpt-4.1', displayName: 'gpt-4.1', supportedGenerationMethods: ['chat'] },
+                            { name: 'gpt-4.1-mini', displayName: 'gpt-4.1-mini', supportedGenerationMethods: ['chat'] },
+                        ];
+                    } else if (chosen.provider === 'anthropic') {
+                        models = [
+                            { name: 'claude-3-5-sonnet', displayName: 'claude-3.5-sonnet', supportedGenerationMethods: ['chat'] },
+                            { name: 'claude-3-opus', displayName: 'claude-3-opus', supportedGenerationMethods: ['chat'] },
+                        ];
+                    }
+                    sendResponse({ models, chosen });
+                })
+                .catch((err) => {
+                    const userMessage = ErrorHandler._getUserFriendlyMessage(err);
+                    sendResponse({ error: userMessage });
+                });
+            return true;
+        }
+        if (provider === 'gemini') {
+            retryAPICall(() => listModels(message.apiKey), {
+                maxRetries: 2,
+                retryableErrors: [APIError]
             })
-            .catch(err => {
-                const userMessage = ErrorHandler._getUserFriendlyMessage(err);
-                sendResponse({ error: userMessage });
-            });
-        return true; // Keep channel open for async response
+                .then(models => {
+                    const geminiModels = (models || []).filter(m => 
+                        m.name && m.name.toLowerCase().includes('gemini')
+                    ).map(m => ({
+                        name: m.name,
+                        displayName: m.displayName || m.name,
+                        supportedGenerationMethods: m.supportedGenerationMethods || []
+                    }));
+                    sendResponse({ models: geminiModels });
+                })
+                .catch(err => {
+                    const userMessage = ErrorHandler._getUserFriendlyMessage(err);
+                    sendResponse({ error: userMessage });
+                });
+            return true; // Keep channel open for async response
+        }
+
+        if (provider === 'openai') {
+            const models = [
+                { name: 'gpt-4.1', displayName: 'gpt-4.1', supportedGenerationMethods: ['chat'] },
+                { name: 'gpt-4.1-mini', displayName: 'gpt-4.1-mini', supportedGenerationMethods: ['chat'] },
+                { name: 'gpt-4o-mini', displayName: 'gpt-4o-mini', supportedGenerationMethods: ['chat'] },
+            ];
+            sendResponse({ models });
+            return false;
+        }
+
+        if (provider === 'anthropic') {
+            const models = [
+                { name: 'claude-3-5-sonnet', displayName: 'claude-3.5-sonnet', supportedGenerationMethods: ['chat'] },
+                { name: 'claude-3-opus', displayName: 'claude-3-opus', supportedGenerationMethods: ['chat'] },
+                { name: 'claude-3-haiku', displayName: 'claude-3-haiku', supportedGenerationMethods: ['chat'] },
+            ];
+            sendResponse({ models });
+            return false;
+        }
+
+        sendResponse({ error: `Unknown provider: ${provider}` });
+        return false;
     }
     
     // Console command to check available models
@@ -629,6 +786,12 @@ async function logAction(text, level = 'INFO') {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'PAGE_LOADED') {
         // Check state and execute next step
+        logger.info('PAGE_LOADED received', { 
+            url: message.url, 
+            senderTabId: sender?.tab?.id,
+            currentTabId: currentState.tabId,
+            status: currentState.status 
+        });
         logAction(`Page loaded: ${message.url}`);
         
         // COMPARISON MODE DISABLED - always use normal flow
@@ -874,15 +1037,7 @@ export function parseIntentSimple(text) {
     
     // Extract platform
     let platform = null;
-    if (lowerText.includes('amazon')) {
-        platform = 'amazon';
-    } else if (lowerText.includes('flipkart')) {
-        platform = 'flipkart';
-    } else if (lowerText.includes('ebay')) {
-        platform = 'ebay';
-    } else if (lowerText.includes('walmart')) {
-        platform = 'walmart';
-    }
+    platform = detectPlatformFromText(lowerText);
     
     // Remove platform keywords and common shopping words
     let product = text
@@ -1018,6 +1173,18 @@ export async function parseIntent(apiKey, text) {
             if (!parsed.filters) {
                 parsed.filters = {};
             }
+            // Override or set platform from explicit text cues if LLM omitted or defaulted
+            const platformFromText = detectPlatformFromText(text.toLowerCase());
+            if (platformFromText) {
+                parsed.platform = parsed.platform || platformFromText;
+                if (parsed.platform === 'amazon' && platformFromText !== 'amazon') {
+                    parsed.platform = platformFromText;
+                }
+            }
+            // Force platforms array when platform is known
+            if (parsed.platform) {
+                parsed.platforms = [parsed.platform];
+            }
             logger.info('LLM extracted intent', { product: parsed.product, platform: parsed.platform, filters: parsed.filters });
             return parsed;
         } catch (parseError) {
@@ -1080,7 +1247,7 @@ export async function startAutomation() {
             throw new Error(`Platform ${platformName} configuration is invalid`);
         }
 
-        // Get platform URL - use amazon.in as default for Amazon
+        // Get platform URL - use homepage like Amazon/Flipkart do
         let platformUrl;
         if (platform.name === 'amazon') {
             platformUrl = 'https://www.amazon.in/';
@@ -1091,8 +1258,8 @@ export async function startAutomation() {
         logger.info('Creating tab', { url: platformUrl, platform: platform.name });
         logAction(`Opening ${platform.name} in a new tab...`, 'info');
         
-        const tab = await chrome.tabs.create({ url: platformUrl });
-    currentState.tabId = tab.id;
+        const tab = await chrome.tabs.create({ url: platformUrl, active: false });
+        currentState.tabId = tab.id;
         currentState.platform = platform;
         
         logger.info('Tab created successfully', { tabId: tab.id, url: platformUrl });
@@ -1509,7 +1676,17 @@ async function performLLMPageAnalysis(tabId, mode = ANALYSIS_MODES.GENERAL) {
 }
 
 export async function executeNextStep(tabId) {
-    if (tabId !== currentState.tabId) return;
+    logger.info('executeNextStep called', { 
+        receivedTabId: tabId, 
+        currentStateTabId: currentState.tabId, 
+        status: currentState.status,
+        platform: currentState.data?.platform 
+    });
+    
+    if (tabId !== currentState.tabId) {
+        logger.warn('Tab ID mismatch - not executing', { receivedTabId: tabId, expectedTabId: currentState.tabId });
+        return;
+    }
 
     if (currentState.status === 'SEARCHING') {
         // Check if we're on search results page or homepage
@@ -1562,8 +1739,8 @@ export async function executeNextStep(tabId) {
                         currentState.status = 'SELECTING';
                         
                         // For AJAX platforms (Flipkart, eBay), continue immediately
-                        // For page reload platforms (Amazon), wait for PAGE_LOADED event
-                        const platformName = currentState.data.platform?.name || 'unknown';
+                        // For page reload platforms (Amazon, JioMart, Ajio, etc.), wait for PAGE_LOADED event
+                        const platformName = currentState.data.platform || currentState.platform?.name || 'unknown';
                         const usesAjax = ['flipkart', 'ebay'].includes(platformName);
                         
                         if (usesAjax) {

@@ -2,13 +2,13 @@
  * Unit tests for State Management
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 
 // Mock the gemini module
-vi.mock('../../src/lib/gemini.js', () => ({
-    generateContent: vi.fn(),
-    setLogAction: vi.fn(),
-    listModels: vi.fn().mockResolvedValue([]),
+jest.mock('../../src/lib/gemini.js', () => ({
+    generateContent: jest.fn(),
+    setLogAction: jest.fn(),
+    listModels: jest.fn().mockResolvedValue([]),
 }));
 
 import { generateContent } from '../../src/lib/gemini.js';
@@ -18,7 +18,7 @@ let sw;
 
 describe('State Management', () => {
     beforeEach(async () => {
-        vi.clearAllMocks();
+        jest.clearAllMocks();
         // Reset currentState before each test
         sw = await import('../../src/background/service_worker.js');
         sw.resetState();
