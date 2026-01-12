@@ -9,6 +9,7 @@
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
 import { logger } from '../../lib/logger.js';
+import { filterProducts, shouldExcludeProduct } from '../../lib/product-filter.js';
 
 export class RelianceDigitalPlatform extends EcommercePlatform {
     constructor() {
@@ -124,7 +125,6 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
             logger.info('RelianceDigital: Extracting products');
             await new Promise(resolve => setTimeout(resolve, 2000));
             
-            const products = [];
             const containerSelectors = [
                 '[class*="sp__product"]',
                 '[class*="product-card"]',
@@ -135,12 +135,18 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
             for (const selector of containerSelectors) {
                 containers = document.querySelectorAll(selector);
                 if (containers.length > 0) {
-                    logger.info(`RelianceDigital: Found ${containers.length} products`);
+                    logger.info(`RelianceDigital: Found ${containers.length} containers`);
                     break;
                 }
             }
             
-            containers.forEach((container, idx) => {
+            // Filter out sponsored and out-of-stock products
+            const { valid, stats } = filterProducts(containers, 'reliancedigital');
+            logger.info('RelianceDigital: Filtered products', stats);
+            
+            const products = [];
+            
+            valid.forEach((container, idx) => {
                 try {
                     const linkEl = container.querySelector('a[href*="/product"]') || container.querySelector('a');
                     if (!linkEl) return;
@@ -159,20 +165,24 @@ export class RelianceDigitalPlatform extends EcommercePlatform {
                     
                     const fullUrl = href.startsWith('http') ? href : `https://www.reliancedigital.in${href}`;
                     
-                    products.push({
+                    const product = {
                         index: idx,
                         title,
                         price,
                         link: fullUrl,
                         image,
                         platform: 'reliancedigital'
-                    });
+                    };
+                    
+                    if (!shouldExcludeProduct(product, 'reliancedigital')) {
+                        products.push(product);
+                    }
                 } catch (e) {
                     // Skip
                 }
             });
             
-            logger.info(`RelianceDigital: Extracted ${products.length} products`);
+            logger.info(`RelianceDigital: Extracted ${products.length} valid products`);
             return products;
         } catch (error) {
             logger.error('RelianceDigital: Failed to get results', error);

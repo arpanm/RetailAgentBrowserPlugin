@@ -3,9 +3,8 @@
  */
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow } from '../shared/actions.js';
-import { findElement, safeClick, fillInput, getText, waitForCondition } from '../shared/selectors.js';
 import { logger } from '../../lib/logger.js';
+import { filterProducts, shouldExcludeProduct } from '../../lib/product-filter.js';
 
 export class AjioPlatform extends EcommercePlatform {
     constructor() {
@@ -14,35 +13,25 @@ export class AjioPlatform extends EcommercePlatform {
             domains: ['ajio.com'],
             selectors: {
                 search: {
-                    input: 'input[name="searchVal"], input[type="search"], input[placeholder*="Search" i], input[class*="search"]',
-                    button: 'button[type="submit"], .ic-search, [class*="search-icon"], svg[class*="search"]',
+                    input: 'input[name="searchVal"], input[type="search"], input[placeholder*="Search" i]',
+                    button: 'button[type="submit"], .ic-search',
                 },
                 results: {
-                    container: [
-                        '.item',
-                        '[class*="product-item"]',
-                        '[class*="item_item"]',
-                        '[class*="rilrtl-products-list__item"]',
-                        '.product-card'
-                    ],
-                    title: '[class*="brand"], [class*="name"], .nameCls, h2, h3, a[href*="/p/"]',
-                    link: 'a[href*="/p/"], a[href*="/product"]',
-                    price: '[class*="price"], .price, [class*="Price"]',
-                    rating: '[class*="rating"]',
+                    container: '.item, [class*="product-item"], [class*="rilrtl-products-list__item"]',
+                    title: '[class*="brand"], [class*="name"]',
+                    link: 'a[href*="/p/"]',
+                    price: '[class*="price"]',
                     image: 'img',
                 },
                 product: {
                     buyNow: [
                         '[class*="add-to-bag"]',
                         '[class*="addtobag"]',
-                        'button[class*="add"]',
-                        '[data-testid="pdp-add-button"]',
-                        'button.add-to-cart',
-                        'button.buy-now'
+                        'button[class*="add"]'
                     ],
-                    addToCart: '[class*="add-to-bag"], [class*="addtobag"], button[class*="add"]',
-                    title: 'h1, .product-title, [class*="prod-name"]',
-                    price: '[class*="prod-sp"], [class*="price"], .price',
+                    addToCart: '[class*="add-to-bag"]',
+                    title: 'h1, .product-title',
+                    price: '[class*="prod-sp"], [class*="price"]',
                 },
             },
         });
@@ -50,15 +39,13 @@ export class AjioPlatform extends EcommercePlatform {
 
     async search(query, filters = {}, sort = null) {
         try {
-            logger.info('Ajio: Performing search', { query, filters, sort });
+            logger.info('Ajio: Performing search', { query });
             
-            // Navigate directly to search URL
+            // Navigate to search URL
             const searchUrl = `https://www.ajio.com/search/?text=${encodeURIComponent(query)}`;
             window.location.href = searchUrl;
             
-            logger.info('Ajio: Search submitted via URL navigation', { query, searchUrl });
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
+            logger.info('Ajio: Search submitted', { query, searchUrl });
             return true;
         } catch (error) {
             logger.error('Ajio: Search failed', error);
@@ -68,14 +55,9 @@ export class AjioPlatform extends EcommercePlatform {
 
     async getSearchResults() {
         try {
-            logger.info('Ajio: Extracting products from page');
-            
-            // Wait for products to load
+            logger.info('Ajio: Extracting products');
             await new Promise(resolve => setTimeout(resolve, 2000));
             
-            const products = [];
-            
-            // Try multiple selectors for product containers
             const containerSelectors = [
                 '.item.rilrtl-products-list__item',
                 '[class*="item_item"]',
@@ -87,54 +69,59 @@ export class AjioPlatform extends EcommercePlatform {
             for (const selector of containerSelectors) {
                 containers = document.querySelectorAll(selector);
                 if (containers.length > 0) {
-                    logger.info(`Ajio: Found ${containers.length} products with selector: ${selector}`);
+                    logger.info(`Ajio: Found ${containers.length} containers with: ${selector}`);
                     break;
                 }
             }
             
-            containers.forEach((container, idx) => {
+            // Filter out sponsored and out-of-stock products
+            const { valid, stats } = filterProducts(containers, 'ajio');
+            logger.info('Ajio: Filtered products', stats);
+            
+            const products = [];
+            
+            valid.forEach((container, idx) => {
                 try {
-                    // Find link
                     const linkEl = container.querySelector('a[href*="/p/"]') || container.querySelector('a');
                     if (!linkEl) return;
                     
                     const href = linkEl.href || linkEl.getAttribute('href');
                     if (!href) return;
                     
-                    // Find title
                     const brandEl = container.querySelector('[class*="brand"]');
                     const nameEl = container.querySelector('[class*="name"]');
                     const title = [brandEl?.textContent?.trim(), nameEl?.textContent?.trim()].filter(Boolean).join(' ') || linkEl.textContent?.trim();
                     
-                    // Find price
                     const priceEl = container.querySelector('[class*="price"]');
                     const price = priceEl?.textContent?.trim() || '';
                     
-                    // Find image
                     const imgEl = container.querySelector('img');
                     const image = imgEl?.src || '';
                     
                     const fullUrl = href.startsWith('http') ? href : `https://www.ajio.com${href}`;
                     
-                    products.push({
+                    const product = {
                         index: idx,
                         title: title || 'Unknown Product',
                         price,
                         link: fullUrl,
                         image,
-                        rating: '',
-                        reviews: '',
                         platform: 'ajio'
-                    });
+                    };
+                    
+                    // Double-check product should not be excluded
+                    if (!shouldExcludeProduct(product, 'ajio')) {
+                        products.push(product);
+                    }
                 } catch (e) {
-                    logger.warn('Ajio: Failed to extract product', { index: idx, error: e.message });
+                    // Skip
                 }
             });
             
-            logger.info(`Ajio: Extracted ${products.length} products`);
+            logger.info(`Ajio: Extracted ${products.length} valid products`);
             return products;
         } catch (error) {
-            logger.error('Ajio: Failed to get search results', error);
+            logger.error('Ajio: Failed to get results', error);
             throw error;
         }
     }
@@ -143,20 +130,12 @@ export class AjioPlatform extends EcommercePlatform {
         try {
             const products = await this.getSearchResults();
             if (products.length === 0) {
-                throw new Error('No products found to select');
+                throw new Error('No products found');
             }
-            if (productIndex >= products.length) {
-                productIndex = 0;
-            }
-
-            const product = products[productIndex];
-            logger.info('Ajio: Selecting product', { index: productIndex, title: product.title, link: product.link });
             
-            if (!product.link || product.link === '') {
-                throw new Error('Product link is missing');
-            }
-
-            // Navigate directly to product page
+            const product = products[Math.min(productIndex, products.length - 1)];
+            logger.info('Ajio: Opening product', { title: product.title });
+            
             window.location.href = product.link;
             return product;
         } catch (error) {
@@ -165,72 +144,39 @@ export class AjioPlatform extends EcommercePlatform {
         }
     }
 
-    async addToCart() {
+    async buyNow() {
         try {
-            logger.info('Ajio: Adding to cart');
-            const selectors = Array.isArray(this.selectors.product.addToCart) 
-                ? this.selectors.product.addToCart 
-                : this.selectors.product.addToCart.split(', ');
+            logger.info('Ajio: Clicking Add to Bag');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const selectors = this.selectors.product.buyNow;
             
             for (const selector of selectors) {
                 const btn = document.querySelector(selector);
                 if (btn && btn.offsetParent !== null) {
                     btn.click();
-                    logger.info('Ajio: Add to cart clicked');
+                    logger.info('Ajio: Add to Bag clicked');
                     return true;
                 }
             }
-            throw new Error('Add to cart button not found');
+            
+            throw new Error('Add to Bag button not found');
         } catch (error) {
-            logger.error('Ajio: Failed to add to cart', error);
+            logger.error('Ajio: Failed to click button', error);
             throw error;
         }
     }
 
-    async buyNow() {
-        try {
-            logger.info('Ajio: Clicking Buy Now / Add to Bag');
-            
-            // Wait for page to load
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            const selectors = Array.isArray(this.selectors.product.buyNow) 
-                ? this.selectors.product.buyNow 
-                : [this.selectors.product.buyNow];
-            
-            for (const selector of selectors) {
-                try {
-                    const btn = document.querySelector(selector);
-                    if (btn && btn.offsetParent !== null) {
-                        logger.info(`Ajio: Found button with selector: ${selector}`);
-                        btn.click();
-                        logger.info('Ajio: Buy Now clicked successfully');
-                        return true;
-                    }
-                } catch (e) {
-                    logger.warn(`Ajio: Selector ${selector} failed`, { error: e.message });
-                }
-            }
-            
-            throw new Error('Buy Now button not found');
-        } catch (error) {
-            logger.error('Ajio: Failed to click Buy Now', error);
-            throw error;
-        }
+    async addToCart() {
+        return this.buyNow();
     }
 
     async getProductDetails() {
         try {
-            const title = document.querySelector(this.selectors.product.title)?.textContent?.trim() || '';
-            const price = document.querySelector(this.selectors.product.price)?.textContent?.trim() || '';
-            
-            return {
-                title,
-                price,
-                url: globalThis.location.href,
-            };
+            const title = document.querySelector('h1, .product-title')?.textContent?.trim() || '';
+            const price = document.querySelector('[class*="prod-sp"], [class*="price"]')?.textContent?.trim() || '';
+            return { title, price, url: window.location.href };
         } catch (error) {
-            logger.error('Ajio: Failed to get product details', error);
             throw error;
         }
     }

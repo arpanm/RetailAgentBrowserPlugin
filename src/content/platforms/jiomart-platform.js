@@ -3,9 +3,8 @@
  */
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
-import { performSearch, extractProducts, clickProduct, addToCart, clickBuyNow } from '../shared/actions.js';
-import { findElement, safeClick, fillInput, getText, waitForCondition } from '../shared/selectors.js';
 import { logger } from '../../lib/logger.js';
+import { filterProducts, shouldExcludeProduct } from '../../lib/product-filter.js';
 
 export class JioMartPlatform extends EcommercePlatform {
     constructor() {
@@ -14,37 +13,25 @@ export class JioMartPlatform extends EcommercePlatform {
             domains: ['jiomart.com'],
             selectors: {
                 search: {
-                    input: 'input[type="text"][name="search"], input[type="search"], input[placeholder*="Search" i]',
-                    button: 'button[type="submit"], .search-btn, [data-testid="search-button"]',
+                    input: 'input[type="search"], input[placeholder*="Search" i], input[name*="search"]',
+                    button: 'button[type="submit"]',
                 },
                 results: {
-                    container: [
-                        '.plp-card-wrapper',
-                        '.ais-InfiniteHits-item',
-                        '[class*="ProductCard"]',
-                        '[class*="product-card"]',
-                        '.plp-card',
-                        'li[class*="product"]'
-                    ],
-                    title: '[class*="plp-card-details-name"], [class*="product-name"], h2, h3, .title, a[href*="/p/"]',
-                    link: 'a[href*="/p/"], a[href*="/product"]',
-                    price: '[class*="plp-card-details-price"], [class*="price"], .offer-price',
-                    rating: '[class*="rating"]',
+                    container: '.plp-card-wrapper, [class*="product-card"], [class*="product-item"]',
+                    title: '[class*="plp-card-details-name"], h3',
+                    link: 'a[href*="/p/"]',
+                    price: '[class*="price"]',
                     image: 'img',
                 },
                 product: {
                     buyNow: [
-                        'button[title*="Add to Cart"]',
-                        'button.addtocartbtn',
-                        'button.buy-now',
-                        'button#btnAddToCart',
-                        '[data-testid="add-to-cart"]',
-                        '.add-to-cart-btn',
-                        '.buy-now-btn'
+                        'button[class*="add-to-cart"]',
+                        'button[class*="addtocart"]',
+                        '[class*="pdp-add-to-cart"]'
                     ],
-                    addToCart: 'button[title*="Add to Cart"], button.addtocartbtn',
-                    title: 'h1, .product-title',
-                    price: '.offer-price, .price',
+                    addToCart: 'button[class*="add-to-cart"]',
+                    title: 'h1, [class*="pdp-title"]',
+                    price: '[class*="pdp-price"], [class*="price"]',
                 },
             },
         });
@@ -52,17 +39,53 @@ export class JioMartPlatform extends EcommercePlatform {
 
     async search(query, filters = {}, sort = null) {
         try {
-            logger.info('JioMart: Performing search', { query, filters, sort });
+            logger.info('JioMart: Performing search', { query });
             
-            // For JioMart, navigate directly to search URL (most reliable)
-            const searchUrl = `https://www.jiomart.com/search/${encodeURIComponent(query)}`;
-            window.location.href = searchUrl;
+            const inputSelectors = [
+                'input[type="search"]',
+                'input[placeholder*="Search" i]',
+                'input[name*="search"]',
+                'input[class*="search"]'
+            ];
             
-            logger.info('JioMart: Search submitted via URL navigation', { query, searchUrl });
-
-            // Wait for search results to load
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
+            let searchInput = null;
+            for (const sel of inputSelectors) {
+                const inputs = document.querySelectorAll(sel);
+                for (const inp of inputs) {
+                    if (inp.offsetParent !== null) {
+                        searchInput = inp;
+                        logger.info(`JioMart: Found search input: ${sel}`);
+                        break;
+                    }
+                }
+                if (searchInput) break;
+            }
+            
+            if (!searchInput) {
+                throw new Error('Search input not found');
+            }
+            
+            searchInput.focus();
+            searchInput.value = query;
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+            
+            await new Promise(r => setTimeout(r, 300));
+            
+            // Press Enter
+            searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+            }));
+            searchInput.dispatchEvent(new KeyboardEvent('keyup', {
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+            }));
+            
+            const form = searchInput.closest('form');
+            if (form) {
+                form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+            }
+            
+            logger.info('JioMart: Search submitted', { query });
             return true;
         } catch (error) {
             logger.error('JioMart: Search failed', error);
@@ -72,61 +95,70 @@ export class JioMartPlatform extends EcommercePlatform {
 
     async getSearchResults() {
         try {
-            logger.info('JioMart: Extracting products from page');
+            logger.info('JioMart: Extracting products');
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
-            const containerSelectors = Array.isArray(this.selectors.results.container) 
-                ? this.selectors.results.container 
-                : [this.selectors.results.container];
+            const containerSelectors = [
+                '.plp-card-wrapper',
+                '[class*="product-card"]',
+                '[class*="product-item"]'
+            ];
             
-            let products = [];
-            
+            let containers = [];
             for (const selector of containerSelectors) {
-                try {
-                    await waitForCondition(async () => {
-                        const found = extractProducts(selector, {
-                            title: this.selectors.results.title,
-                            price: this.selectors.results.price,
-                            link: this.selectors.results.link,
-                            image: this.selectors.results.image,
-                            rating: this.selectors.results.rating,
-                        });
-                        if (found.length > 0) {
-                            products = found;
-                            return true;
-                        }
-                        return false;
-                    }, { timeout: 10000, interval: 500 });
-                    
-                    if (products.length > 0) {
-                        logger.info(`JioMart: Successfully extracted ${products.length} products with selector: ${selector}`);
-                        break;
-                    }
-                } catch (e) {
-                    logger.debug(`JioMart: Selector ${selector} failed or timed out`);
+                containers = document.querySelectorAll(selector);
+                if (containers.length > 0) {
+                    logger.info(`JioMart: Found ${containers.length} containers`);
+                    break;
                 }
             }
-
-            if (products.length === 0) {
-                logger.warn('JioMart: No products found with any selector');
-                return [];
-            }
-
-            // Ensure all products are plain serializable objects
-            const serializableProducts = products.map((product, idx) => ({
-                index: idx,
-                title: String(product.title || ''),
-                price: String(product.price || ''),
-                link: String(product.link || ''),
-                image: String(product.image || ''),
-                rating: String(product.rating || ''),
-                reviews: String(product.reviews || ''),
-                platform: 'jiomart'
-            }));
             
-            logger.info(`JioMart: Found ${serializableProducts.length} products total`);
-            return serializableProducts;
+            // Filter out sponsored and out-of-stock products
+            const { valid, stats } = filterProducts(containers, 'jiomart');
+            logger.info('JioMart: Filtered products', stats);
+            
+            const products = [];
+            
+            valid.forEach((container, idx) => {
+                try {
+                    const linkEl = container.querySelector('a[href*="/p/"]') || container.querySelector('a');
+                    if (!linkEl) return;
+                    
+                    const href = linkEl.href || linkEl.getAttribute('href');
+                    if (!href) return;
+                    
+                    const titleEl = container.querySelector('[class*="plp-card-details-name"], h3') || linkEl;
+                    const title = titleEl?.textContent?.trim() || 'Product';
+                    
+                    const priceEl = container.querySelector('[class*="price"]');
+                    const price = priceEl?.textContent?.trim() || '';
+                    
+                    const imgEl = container.querySelector('img');
+                    const image = imgEl?.src || '';
+                    
+                    const fullUrl = href.startsWith('http') ? href : `https://www.jiomart.com${href}`;
+                    
+                    const product = {
+                        index: idx,
+                        title,
+                        price,
+                        link: fullUrl,
+                        image,
+                        platform: 'jiomart'
+                    };
+                    
+                    if (!shouldExcludeProduct(product, 'jiomart')) {
+                        products.push(product);
+                    }
+                } catch (e) {
+                    // Skip
+                }
+            });
+            
+            logger.info(`JioMart: Extracted ${products.length} valid products`);
+            return products;
         } catch (error) {
-            logger.error('JioMart: Failed to get search results', error);
+            logger.error('JioMart: Failed to get results', error);
             throw error;
         }
     }
@@ -135,20 +167,13 @@ export class JioMartPlatform extends EcommercePlatform {
         try {
             const products = await this.getSearchResults();
             if (products.length === 0) {
-                throw new Error('No products found to select');
+                throw new Error('No products found');
             }
-            if (productIndex >= products.length) {
-                throw new Error(`Product index ${productIndex} out of range (max ${products.length - 1})`);
-            }
-
-            const product = products[productIndex];
-            logger.info('JioMart: Selecting product', { index: productIndex, title: product.title, link: product.link });
             
-            if (!product.link || product.link === '') {
-                throw new Error('Product link is missing');
-            }
-
-            await clickProduct(product.link);
+            const product = products[Math.min(productIndex, products.length - 1)];
+            logger.info('JioMart: Opening product', { title: product.title });
+            
+            window.location.href = product.link;
             return product;
         } catch (error) {
             logger.error('JioMart: Failed to select product', error);
@@ -156,62 +181,39 @@ export class JioMartPlatform extends EcommercePlatform {
         }
     }
 
-    async addToCart() {
+    async buyNow() {
         try {
-            logger.info('JioMart: Adding to cart');
-            await addToCart({ button: this.selectors.product.addToCart });
-            return true;
+            logger.info('JioMart: Clicking Add to Cart');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const selectors = this.selectors.product.buyNow;
+            
+            for (const selector of selectors) {
+                const btn = document.querySelector(selector);
+                if (btn && btn.offsetParent !== null) {
+                    btn.click();
+                    logger.info('JioMart: Add to Cart clicked');
+                    return true;
+                }
+            }
+            
+            throw new Error('Add to Cart button not found');
         } catch (error) {
-            logger.error('JioMart: Failed to add to cart', error);
+            logger.error('JioMart: Failed to click button', error);
             throw error;
         }
     }
 
-    async buyNow() {
-        try {
-            logger.info('JioMart: Clicking Buy Now');
-            
-            const selectors = Array.isArray(this.selectors.product.buyNow) 
-                ? this.selectors.product.buyNow 
-                : [this.selectors.product.buyNow];
-            
-            let lastError = null;
-            for (const selector of selectors) {
-                try {
-                    logger.info(`JioMart: Trying Buy Now selector: ${selector}`);
-                    await clickBuyNow({ button: selector }, {
-                        maxRetries: 5,
-                        initialDelay: 1000,
-                        waitTimeout: 10000
-                    });
-                    logger.info('JioMart: Buy Now clicked successfully');
-                    return true;
-                } catch (error) {
-                    logger.warn(`JioMart: Selector ${selector} failed`, { error: error.message });
-                    lastError = error;
-                    continue;
-                }
-            }
-            
-            throw lastError || new Error('All Buy Now selectors failed');
-        } catch (error) {
-            logger.error('JioMart: Failed to click Buy Now', error);
-            throw error;
-        }
+    async addToCart() {
+        return this.buyNow();
     }
 
     async getProductDetails() {
         try {
-            const title = getText(document.querySelector(this.selectors.product.title));
-            const price = getText(document.querySelector(this.selectors.product.price));
-            
-            return {
-                title,
-                price,
-                url: globalThis.location.href,
-            };
+            const title = document.querySelector('h1, [class*="pdp-title"]')?.textContent?.trim() || '';
+            const price = document.querySelector('[class*="pdp-price"], [class*="price"]')?.textContent?.trim() || '';
+            return { title, price, url: window.location.href };
         } catch (error) {
-            logger.error('JioMart: Failed to get product details', error);
             throw error;
         }
     }

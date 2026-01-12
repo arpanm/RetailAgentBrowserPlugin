@@ -9,6 +9,7 @@
 
 import { EcommercePlatform } from '../../lib/ecommerce-platforms.js';
 import { logger } from '../../lib/logger.js';
+import { filterProducts, shouldExcludeProduct } from '../../lib/product-filter.js';
 
 export class TiraBeautyPlatform extends EcommercePlatform {
     constructor() {
@@ -125,7 +126,6 @@ export class TiraBeautyPlatform extends EcommercePlatform {
             logger.info('TiraBeauty: Extracting products');
             await new Promise(resolve => setTimeout(resolve, 2000));
             
-            const products = [];
             const containerSelectors = [
                 '[class*="ProductCard"]',
                 '[class*="product-card"]',
@@ -137,12 +137,18 @@ export class TiraBeautyPlatform extends EcommercePlatform {
             for (const selector of containerSelectors) {
                 containers = document.querySelectorAll(selector);
                 if (containers.length > 0) {
-                    logger.info(`TiraBeauty: Found ${containers.length} products`);
+                    logger.info(`TiraBeauty: Found ${containers.length} containers`);
                     break;
                 }
             }
             
-            containers.forEach((container, idx) => {
+            // Filter out sponsored and out-of-stock products
+            const { valid, stats } = filterProducts(containers, 'tirabeauty');
+            logger.info('TiraBeauty: Filtered products', stats);
+            
+            const products = [];
+            
+            valid.forEach((container, idx) => {
                 try {
                     const linkEl = container.querySelector('a[href*="/product"]') || container.querySelector('a');
                     if (!linkEl) return;
@@ -161,20 +167,24 @@ export class TiraBeautyPlatform extends EcommercePlatform {
                     
                     const fullUrl = href.startsWith('http') ? href : `https://www.tirabeauty.com${href}`;
                     
-                    products.push({
+                    const product = {
                         index: idx,
                         title,
                         price,
                         link: fullUrl,
                         image,
                         platform: 'tirabeauty'
-                    });
+                    };
+                    
+                    if (!shouldExcludeProduct(product, 'tirabeauty')) {
+                        products.push(product);
+                    }
                 } catch (e) {
                     // Skip
                 }
             });
             
-            logger.info(`TiraBeauty: Extracted ${products.length} products`);
+            logger.info(`TiraBeauty: Extracted ${products.length} valid products`);
             return products;
         } catch (error) {
             logger.error('TiraBeauty: Failed to get results', error);
