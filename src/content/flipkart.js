@@ -7,6 +7,7 @@ import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
 import { navigateToFlipkartLogin, clickFlipkartLoginButton, enterFlipkartPhoneNumber, sendFlipkartOTP, checkFlipkartLoginProgress } from './shared/login-handlers.js';
 import { getSimplifiedPageContent } from './shared/actions.js';
+import { extractAvailableFilters, buildFilterUrl } from '../lib/llm-filter-analyzer.js';
 
 // Register Flipkart platform
 const flipkartPlatform = new FlipkartPlatform();
@@ -41,12 +42,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     
+    if (request.action === 'GET_AVAILABLE_FILTERS') {
+        (async () => {
+            try {
+                logger.info('Flipkart: Getting available filters...');
+                await new Promise(r => setTimeout(r, 2000)); // Wait for page to load
+                const filters = extractAvailableFilters('flipkart');
+                logger.info('Flipkart: Available filters', { categoryCount: filters.categories.length });
+                sendResponse({ filters, success: true });
+            } catch (error) {
+                logger.error('Flipkart: Failed to get filters', error);
+                sendResponse({ filters: { categories: [] }, success: false, error: error.message });
+            }
+        })();
+        return true;
+    }
+    
     if (request.action === 'APPLY_FILTERS') {
         (async () => {
             try {
                 logger.info('Flipkart: Applying filters', { filters: request.filters });
-                await flipkartPlatform.applyFilters(request.filters || {});
-                sendResponse({ success: true });
+                
+                // Try URL-based filtering first (faster and more reliable)
+                const currentUrl = window.location.href;
+                const filteredUrl = buildFilterUrl('flipkart', currentUrl, request.filters);
+                
+                if (filteredUrl !== currentUrl) {
+                    logger.info('Flipkart: Navigating to filtered URL', { filteredUrl });
+                    window.location.href = filteredUrl;
+                    sendResponse({ success: true, navigated: true });
+                } else {
+                    // Fallback to DOM-based filtering
+                    await flipkartPlatform.applyFilters(request.filters || {});
+                    sendResponse({ success: true, navigated: false });
+                }
             } catch (error) {
                 logger.error('Flipkart: Failed to apply filters', error);
                 sendResponse({ success: false, error: error.message || 'Unknown error' });

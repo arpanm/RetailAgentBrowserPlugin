@@ -1211,6 +1211,109 @@ export async function parseIntent(apiKey, text) {
     }
 }
 
+/**
+ * LLM-based filter analysis
+ * Analyzes available filters on the page and determines which ones to apply based on user intent
+ */
+export async function analyzeFiltersWithLLM(apiKey, userIntent, availableFilters, originalFilters) {
+    try {
+        logger.info('Analyzing filters with LLM', { 
+            userIntent, 
+            filterCategoryCount: availableFilters?.categories?.length || 0,
+            originalFilters 
+        });
+        
+        // If no available filters, just return original filters
+        if (!availableFilters || !availableFilters.categories || availableFilters.categories.length === 0) {
+            logger.info('No available filters found on page, using original filters');
+            return originalFilters;
+        }
+        
+        const prompt = `You are a shopping filter assistant. Given the user's shopping intent and available filters on an e-commerce page, determine which filters should be applied.
+
+User Intent: "${userIntent}"
+
+Original Parsed Filters: ${JSON.stringify(originalFilters)}
+
+Available Filters on Page:
+${JSON.stringify(availableFilters.categories.slice(0, 15), null, 2)}
+
+Based on the user's intent AND what filters are actually available on the page, return a JSON object with filters to apply.
+Only include filters that match what's available on the page.
+
+Return ONLY a valid JSON object with these possible fields (only include fields that apply):
+- brand: string (exact brand name from available options)
+- price_min: number
+- price_max: number  
+- ram: string (e.g., "4 GB", "6 GB" - use exact format from available options)
+- storage: string (e.g., "64 GB", "128 GB")
+- size: string (e.g., "S", "M", "L", "XL")
+- color: string (e.g., "White", "Black")
+- gender: string ("Men", "Women")
+- category: string
+
+Return ONLY the JSON object, no other text or markdown.`;
+
+        const response = await generateContent(apiKey, prompt, "You are a filter matching assistant. Return only valid JSON.");
+        
+        if (!response) {
+            logger.warn('No response from LLM for filter analysis');
+            return originalFilters;
+        }
+        
+        // Parse JSON response
+        const cleanResponse = response.replace(/```json\n?|\n?```/g, '').trim();
+        const analyzedFilters = JSON.parse(cleanResponse);
+        
+        logger.info('LLM analyzed filters', { analyzedFilters });
+        
+        // Merge with original filters, preferring LLM analysis
+        return {
+            ...originalFilters,
+            ...analyzedFilters
+        };
+        
+    } catch (error) {
+        logger.warn('LLM filter analysis failed, using original filters', { error: error.message });
+        return originalFilters;
+    }
+}
+
+/**
+ * Get Gemini API key from storage
+ */
+async function getGeminiApiKey() {
+    try {
+        const { geminiApiKey } = await chrome.storage.local.get(['geminiApiKey']);
+        return geminiApiKey || null;
+    } catch (error) {
+        logger.warn('Failed to get Gemini API key', { error: error.message });
+        return null;
+    }
+}
+
+/**
+ * Get available filters from content script
+ */
+async function getAvailableFiltersFromPage(tabId) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            logger.warn('Timeout getting available filters');
+            resolve({ categories: [] });
+        }, 10000);
+        
+        chrome.tabs.sendMessage(tabId, { action: 'GET_AVAILABLE_FILTERS' }, (response) => {
+            clearTimeout(timeout);
+            if (chrome.runtime.lastError) {
+                logger.warn('Error getting available filters', { error: chrome.runtime.lastError.message });
+                resolve({ categories: [] });
+            } else {
+                resolve(response?.filters || { categories: [] });
+            }
+        });
+    });
+}
+
 export async function startAutomation() {
     try {
         // COMPARISON MODE TEMPORARILY DISABLED - causes infinite loops
@@ -1903,15 +2006,47 @@ export async function executeNextStep(tabId) {
     else if (currentState.status === 'SELECTING') {
         logAction('Analyzing search results...', 'info');
 
+        // Get platform name - used throughout this block
+        const platformName = typeof currentState.data.platform === 'string' 
+            ? currentState.data.platform 
+            : (currentState.data.platform?.name || currentState.platform?.name || 'unknown');
+
         // 1. Check if we need to apply filters first
-        const filters = currentState.data.filters || {};
+        let filters = currentState.data.filters || {};
         if (Object.keys(filters).length > 0 && !currentState.filtersApplied) {
-            logger.info('Applying filters in SELECTING state', { filters });
-            logAction('Applying filters to search results...', 'info');
+            logger.info('Applying filters in SELECTING state', { filters, platform: platformName });
+            logAction('Analyzing page filters with AI...', 'info');
             
             try {
                 // Set flag BEFORE applying to avoid infinite loop on page reloads
                 currentState.filtersApplied = true;
+                
+                // For platforms that support LLM-based filter analysis (Flipkart, JioMart, Ajio)
+                const supportsLLMFilters = ['flipkart', 'jiomart', 'ajio'].includes(platformName);
+                
+                if (supportsLLMFilters) {
+                    // Get available filters from page
+                    logger.info('Getting available filters from page...', { platform: platformName });
+                    const availableFilters = await getAvailableFiltersFromPage(tabId);
+                    
+                    if (availableFilters.categories && availableFilters.categories.length > 0) {
+                        // Use LLM to analyze which filters to apply
+                        const geminiApiKey = await getGeminiApiKey();
+                        if (geminiApiKey) {
+                            const userIntent = currentState.data.originalQuery || currentState.data.product || '';
+                            const analyzedFilters = await analyzeFiltersWithLLM(
+                                geminiApiKey, 
+                                userIntent, 
+                                availableFilters, 
+                                filters
+                            );
+                            filters = analyzedFilters;
+                            logger.info('LLM analyzed filters', { original: currentState.data.filters, analyzed: filters });
+                        }
+                    }
+                }
+                
+                logAction('Applying filters to search results...', 'info');
                 
                 const filterResponse = await new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
@@ -1937,16 +2072,18 @@ export async function executeNextStep(tabId) {
                     logger.info('Filters applied, waiting for results...', { filters });
                     logAction('Filters applied, waiting for results...', 'info');
                     
-                    // Get platform name correctly - it's stored as a string, not object
-                    const platformName = typeof currentState.data.platform === 'string' 
-                        ? currentState.data.platform 
-                        : (currentState.data.platform?.name || currentState.platform?.name || 'unknown');
-                    
                     // Platforms that use AJAX/SPA navigation (don't reload page on filter)
                     // Most modern platforms use AJAX, only Amazon requires full page reload
                     const usesAjax = ['flipkart', 'ebay', 'ajio', 'jiomart', 'reliancedigital', 'tirabeauty', 'bigbasket', 'blinkit', 'zepto'].includes(platformName);
                     
                     logger.info('Filter handling - platform detection', { platformName, usesAjax });
+                    
+                    // Check if filter application triggered a navigation
+                    if (filterResponse.navigated) {
+                        logger.info('Filter application triggered navigation, waiting for PAGE_LOADED');
+                        // Wait for PAGE_LOADED event
+                        return;
+                    }
                     
                     if (usesAjax) {
                         // For AJAX platforms, wait for DOM to update but don't return

@@ -6,6 +6,7 @@
 import { JioMartPlatform } from './platforms/jiomart-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
+import { extractAvailableFilters, buildFilterUrl } from '../lib/llm-filter-analyzer.js';
 
 // Register JioMart platform
 const jiomartPlatform = new JioMartPlatform();
@@ -19,13 +20,11 @@ function notifyPageLoaded() {
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', notifyPageLoaded);
 } else {
-    // DOM already loaded
     notifyPageLoaded();
 }
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    // Handle async operations properly
     if (request.action === 'SEARCH') {
         (async () => {
             try {
@@ -54,14 +53,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 });
                 
                 const serializableProducts = JSON.parse(JSON.stringify(validProducts));
-                logger.info('Content script: Sending response', { 
-                    itemCount: serializableProducts.length,
-                    sampleTitles: serializableProducts.slice(0, 3).map(p => p.title?.substring(0, 50))
-                });
                 sendResponse({ items: serializableProducts, success: true });
             } catch (error) {
                 logger.error('Content script: Error getting search results', error);
                 sendResponse({ items: [], success: false, error: error.message || 'Unknown error' });
+            }
+        })();
+        return true;
+    }
+    
+    if (request.action === 'GET_AVAILABLE_FILTERS') {
+        (async () => {
+            try {
+                logger.info('JioMart: Getting available filters...');
+                await new Promise(r => setTimeout(r, 2000)); // Wait for page to load
+                const filters = extractAvailableFilters('jiomart');
+                logger.info('JioMart: Available filters', { categoryCount: filters.categories.length });
+                sendResponse({ filters, success: true });
+            } catch (error) {
+                logger.error('JioMart: Failed to get filters', error);
+                sendResponse({ filters: { categories: [] }, success: false, error: error.message });
+            }
+        })();
+        return true;
+    }
+    
+    if (request.action === 'APPLY_FILTERS') {
+        (async () => {
+            try {
+                logger.info('JioMart: Applying filters', { filters: request.filters });
+                const currentUrl = window.location.href;
+                const filteredUrl = buildFilterUrl('jiomart', currentUrl, request.filters);
+                
+                if (filteredUrl !== currentUrl) {
+                    logger.info('JioMart: Navigating to filtered URL', { filteredUrl });
+                    window.location.href = filteredUrl;
+                    sendResponse({ success: true, navigated: true });
+                } else {
+                    logger.info('JioMart: No URL change needed');
+                    sendResponse({ success: true, navigated: false });
+                }
+            } catch (error) {
+                logger.error('JioMart: Failed to apply filters', error);
+                sendResponse({ success: false, error: error.message });
             }
         })();
         return true;
@@ -92,4 +126,3 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     return false;
 });
-

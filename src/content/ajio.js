@@ -6,6 +6,7 @@
 import { AjioPlatform } from './platforms/ajio-platform.js';
 import { platformRegistry } from '../lib/ecommerce-platforms.js';
 import { logger } from '../lib/logger.js';
+import { extractAvailableFilters, buildFilterUrl } from '../lib/llm-filter-analyzer.js';
 
 // Register Ajio platform
 const ajioPlatform = new AjioPlatform();
@@ -61,6 +62,45 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     
+    if (request.action === 'GET_AVAILABLE_FILTERS') {
+        (async () => {
+            try {
+                logger.info('Ajio: Getting available filters...');
+                await new Promise(r => setTimeout(r, 2000)); // Wait for page to load
+                const filters = extractAvailableFilters('ajio');
+                logger.info('Ajio: Available filters', { categoryCount: filters.categories.length });
+                sendResponse({ filters, success: true });
+            } catch (error) {
+                logger.error('Ajio: Failed to get filters', error);
+                sendResponse({ filters: { categories: [] }, success: false, error: error.message });
+            }
+        })();
+        return true;
+    }
+    
+    if (request.action === 'APPLY_FILTERS') {
+        (async () => {
+            try {
+                logger.info('Ajio: Applying filters', { filters: request.filters });
+                const currentUrl = window.location.href;
+                const filteredUrl = buildFilterUrl('ajio', currentUrl, request.filters);
+                
+                if (filteredUrl !== currentUrl) {
+                    logger.info('Ajio: Navigating to filtered URL', { filteredUrl });
+                    window.location.href = filteredUrl;
+                    sendResponse({ success: true, navigated: true });
+                } else {
+                    logger.info('Ajio: No URL change needed');
+                    sendResponse({ success: true, navigated: false });
+                }
+            } catch (error) {
+                logger.error('Ajio: Failed to apply filters', error);
+                sendResponse({ success: false, error: error.message });
+            }
+        })();
+        return true;
+    }
+    
     if (request.action === 'CLICK_BUY_NOW') {
         ajioPlatform.buyNow().then(success => {
             sendResponse({ success });
@@ -86,4 +126,3 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
     return false;
 });
-
